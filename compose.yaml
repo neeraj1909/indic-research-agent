@@ -1,0 +1,51 @@
+services:
+  app:
+    build:
+      context: .
+    environment:
+      APP_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/indic_research_agent
+      REDIS_URL: redis://redis:6379/0
+      LITELLM_MODEL: ${LITELLM_MODEL:-openai/gpt-4o-mini}
+      LITELLM_CUSTOM_LLM_PROVIDER: ${LITELLM_CUSTOM_LLM_PROVIDER:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_API_BASE: ${LITELLM_API_BASE:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      QUERY_KIT_PROVIDERS: ${QUERY_KIT_PROVIDERS:-all}
+      QUERY_KIT_TIMEOUT_SECONDS: ${QUERY_KIT_TIMEOUT_SECONDS:-30}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: indic_research_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d indic_research_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres_data:
