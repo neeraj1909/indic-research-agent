@@ -1,0 +1,64 @@
+[project]
+name = "indic-research-agent"
+version = "0.1.0"
+description = "BM25-first research agent using query-kit, LiteLLM, LangGraph, Chainlit, PostgreSQL, and Redis."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.13",
+    "asyncpg>=0.29",
+    "bm25s>=0.2.0",
+    "chainlit>=2.0",
+    "langchain>=0.3",
+    "langchain-community>=0.3",
+    "langchain-core>=0.3",
+    "langchain-litellm>=0.6.4",
+    "langgraph>=0.2",
+    "litellm>=1.60",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "query-kit @ git+https://github.com/neeraj1909/query-kit.git",
+    "redis>=5.0",
+    "sqlalchemy[asyncio]>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "unit: fast unit tests",
+    "integration: tests requiring external services or process-level integration",
+    "e2e: end-to-end application smoke tests",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["*.md", "**/*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/indic_research_agent"]
