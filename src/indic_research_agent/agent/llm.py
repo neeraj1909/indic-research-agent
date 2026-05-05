@@ -10,10 +10,15 @@ from collections.abc import Sequence
 from langchain_core.messages import HumanMessage
 from langchain_litellm import ChatLiteLLM
 
+from indic_research_agent.agent.openai_streaming import (
+    OpenAICompatibleStreamingChatModel,
+)
 from indic_research_agent.config import AppSettings, get_settings
 
 
-def create_chat_model(settings: AppSettings | None = None) -> ChatLiteLLM:
+def create_chat_model(
+    settings: AppSettings | None = None,
+) -> ChatLiteLLM | OpenAICompatibleStreamingChatModel:
     """Create the LiteLLM-backed LangChain chat model."""
 
     settings = settings or get_settings()
@@ -22,6 +27,16 @@ def create_chat_model(settings: AppSettings | None = None) -> ChatLiteLLM:
         if settings.litellm_api_key is not None
         else None
     )
+    if _should_use_streaming_proxy_adapter(settings, api_key):
+        return OpenAICompatibleStreamingChatModel(
+            model=settings.litellm_model,
+            api_key=api_key,
+            api_base=settings.litellm_api_base or "",
+            temperature=settings.litellm_temperature,
+            request_timeout=settings.litellm_timeout_seconds,
+            max_tokens=settings.litellm_max_tokens,
+            streaming=settings.litellm_streaming,
+        )
     return ChatLiteLLM(
         model=settings.litellm_model,
         custom_llm_provider=settings.litellm_custom_llm_provider,
@@ -82,6 +97,18 @@ async def _main_async(argv: Sequence[str] | None = None) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     return asyncio.run(_main_async(argv))
+
+
+def _should_use_streaming_proxy_adapter(
+    settings: AppSettings,
+    api_key: str | None,
+) -> bool:
+    return bool(
+        settings.litellm_streaming
+        and settings.litellm_model.startswith("chatgpt/")
+        and settings.litellm_api_base
+        and api_key
+    )
 
 
 if __name__ == "__main__":

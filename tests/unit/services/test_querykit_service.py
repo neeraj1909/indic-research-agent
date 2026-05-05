@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from query_cli.domain.errors import ProviderSearchError
 
 from indic_research_agent.config import AppSettings
 from indic_research_agent.services.querykit_service import QueryKitService
@@ -76,3 +77,39 @@ async def test_querykit_service_returns_empty_for_blank_query() -> None:
     )
 
     assert await service.search("  ") == []
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_retries_all_providers_individually() -> None:
+    provider_calls = []
+
+    def provider_factory(provider_ids, *, timeout, environ):
+        provider_calls.append(provider_ids)
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year):
+        if providers == ["all"]:
+            raise ProviderSearchError("all", "combined search failed")
+        if providers == ["acl"]:
+            raise ProviderSearchError("acl", "provider failed")
+        if providers == ["arxiv"]:
+            return [
+                FakeQueryKitResult(
+                    title="Fallback paper",
+                    url="https://example.test/fallback",
+                    source="arxiv",
+                    abstract="Recovered from a per-provider retry.",
+                )
+            ]
+        return []
+
+    service = QueryKitService(
+        AppSettings(query_kit_providers="all"),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    results = await service.search("indic hate speech", limit=2)
+
+    assert provider_calls[:3] == [["all"], ["acl"], ["arxiv"]]
+    assert results[0].title == "Fallback paper"
