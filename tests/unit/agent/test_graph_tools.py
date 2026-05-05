@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+from langchain_core.messages import AIMessage
+
+from indic_research_agent.agent.graph import build_agent_graph
+from indic_research_agent.retrieval import DocumentChunk, SearchService
+from indic_research_agent.retrieval.search_service import SearchResult
+from indic_research_agent.tools.fetch import FetchTool
+from indic_research_agent.tools.search import SearchTool
+
+pytestmark = pytest.mark.unit
+
+
+class FakeToolCallingModel:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.bound_tools = None
+
+    def bind_tools(self, tools):
+        self.bound_tools = tools
+        return self
+
+    async def ainvoke(self, messages):
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search",
+                        "args": {
+                            "query": "bm25 keyword retrieval",
+                            "top_k": 2,
+                            "source": "all",
+                        },
+                        "id": "call-search",
+                    }
+                ],
+            )
+        if self.calls == 2:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "fetch",
+                        "args": {
+                            "document_id": "bm25",
+                            "chunk_id": "bm25-1",
+                            "max_chars": 120,
+                        },
+                        "id": "call-fetch",
+                    }
+                ],
+            )
+        return AIMessage(content="BM25 retrieval works with fetched evidence.")
+
+
+class FakeQueryKitService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def search(self, query, *, providers=None, limit=5, since_year=None):
+        self.calls.append(
+            {
+                "query": query,
+                "providers": providers,
+                "limit": limit,
+                "since_year": since_year,
+            }
+        )
+        return [
+            SearchResult(
+                document_id="query-kit:research-1",
+                chunk_id="abstract",
+                score=1.0,
+                title="Query-kit research result",
+                source="https://example.test/research",
+                snippet="Public research result from query-kit.",
+                metadata={"provider": "fake"},
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_graph_executes_search_then_fetch_then_final_answer() -> None:
+    search_service = SearchService(
+        [
+            DocumentChunk(
+                document_id="bm25",
+                chunk_id="bm25-1",
+                title="BM25",
+                source="test://bm25",
+                text="BM25 keyword retrieval ranks chunks without embeddings.",
+            )
+        ]
+    )
+    model = FakeToolCallingModel()
+    querykit_service = FakeQueryKitService()
+    graph = build_agent_graph(
+        model,
+        search_tool=SearchTool(search_service, querykit_service),
+        fetch_tool=FetchTool(search_service),
+    )
+
+    result = await graph.ainvoke(
+        {
+            "messages": [],
+            "tool_call_count": 0,
+            "retrieved_context": [],
+            "final_answer": None,
+        }
+    )
+
+    assert model.bound_tools is not None
+    assert model.calls == 3
+    assert result["final_answer"] == "BM25 retrieval works with fetched evidence."
+    assert result["tool_call_count"] == 2
+    assert len(result["retrieved_context"]) == 2
+    search_payload = json.loads(result["retrieved_context"][0])
+    fetch_payload = json.loads(result["retrieved_context"][1])
+    assert querykit_service.calls
+    assert {item["document_id"] for item in search_payload} == {
+        "bm25",
+        "query-kit:research-1",
+    }
+    assert fetch_payload["content"].startswith("BM25 keyword retrieval")
