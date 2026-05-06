@@ -5,6 +5,12 @@ services:
     environment:
       APP_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/indic_research_agent
       REDIS_URL: redis://redis:6379/0
+      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET:-dev-only-chainlit-auth-secret-change-me}
+      CHAINLIT_AUTH_ENABLED: ${CHAINLIT_AUTH_ENABLED:-true}
+      CHAINLIT_AUTH_USERNAME: ${CHAINLIT_AUTH_USERNAME:-test}
+      CHAINLIT_AUTH_PASSWORD: ${CHAINLIT_AUTH_PASSWORD:-test1234}
+      CHAINLIT_DATABASE_URL: ${CHAINLIT_DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/indic_research_agent}
+      CHAINLIT_DATABASE_SCHEMA: ${CHAINLIT_DATABASE_SCHEMA:-chainlit}
       LITELLM_MODEL: ${LITELLM_MODEL:-openai/gpt-4o-mini}
       LITELLM_CUSTOM_LLM_PROVIDER: ${LITELLM_CUSTOM_LLM_PROVIDER:-}
       LITELLM_API_KEY: ${LITELLM_API_KEY:-}

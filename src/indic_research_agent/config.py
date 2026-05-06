@@ -46,6 +46,22 @@ class AppSettings(BaseSettings):
     )
     redis_url: str = "redis://localhost:6379/0"
 
+    chainlit_auth_enabled: bool = True
+    chainlit_auth_secret: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CHAINLIT_AUTH_SECRET"),
+    )
+    chainlit_auth_username: str = "test"
+    chainlit_auth_password: SecretStr = SecretStr("test1234")
+    chainlit_database_url: str = Field(
+        default=(
+            "postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent"
+        ),
+        validation_alias=AliasChoices("CHAINLIT_DATABASE_URL"),
+    )
+    chainlit_database_schema: str = "chainlit"
+    chainlit_data_layer_show_logger: bool = False
+
     @property
     def query_kit_provider_ids(self) -> list[str]:
         return [
