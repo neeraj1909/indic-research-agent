@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
 from indic_research_agent.agent.prompts import SYSTEM_PROMPT
@@ -38,21 +39,45 @@ def build_agent_graph(
     async def call_model(state: AgentState) -> dict[str, Any]:
         messages = _with_system_prompt(state.get("messages", []))
         start = time.perf_counter()
+        tool_call_count = state.get("tool_call_count", 0)
         logger.info(
             "agent.llm.start messages=%s tool_calls=%s",
             len(messages),
-            state.get("tool_call_count", 0),
+            tool_call_count,
+        )
+        _emit_custom(
+            {
+                "event": "agent.llm.start",
+                "messages": len(messages),
+                "tool_call_count": tool_call_count,
+                "label": "Final synthesis" if tool_call_count else "LLM call",
+            }
         )
         response = await _ainvoke(bound_model, messages)
         elapsed = time.perf_counter() - start
+        requested_tool_calls = len(_tool_calls(response))
         logger.info(
             "agent.llm.end elapsed_seconds=%.2f requested_tool_calls=%s",
             elapsed,
-            len(_tool_calls(response)),
+            requested_tool_calls,
+        )
+        _emit_custom(
+            {
+                "event": "agent.llm.end",
+                "latency_ms": elapsed * 1000,
+                "requested_tool_calls": requested_tool_calls,
+            }
         )
         update: dict[str, Any] = {"messages": [response]}
         if not _tool_calls(response):
-            update["final_answer"] = _message_content(response)
+            final_answer = _message_content(response)
+            update["final_answer"] = final_answer
+            _emit_custom(
+                {
+                    "event": "agent.answer.finalized",
+                    "answer_chars": len(final_answer),
+                }
+            )
         return update
 
     async def call_tools(state: AgentState) -> dict[str, Any]:
@@ -64,6 +89,15 @@ def build_agent_graph(
             tool_args = tool_call.get("args", {})
             start = time.perf_counter()
             logger.info("agent.tool.start name=%s args=%s", tool_name, tool_args)
+            _emit_custom(
+                {
+                    "event": "agent.tool.start",
+                    "name": tool_name,
+                    "tool_call_id": tool_call.get("id"),
+                    "args": tool_args,
+                    "args_summary": _summarize_mapping(tool_args),
+                }
+            )
             if tool_name == "search":
                 result = await search_tool.run(
                     SearchToolInput.model_validate(tool_args)
@@ -72,13 +106,25 @@ def build_agent_graph(
                 result = await fetch_tool.run(FetchToolInput.model_validate(tool_args))
             else:
                 raise ValueError(f"unknown tool: {tool_name}")
+            elapsed = time.perf_counter() - start
             logger.info(
                 "agent.tool.end name=%s elapsed_seconds=%.2f",
                 tool_name,
-                time.perf_counter() - start,
+                elapsed,
             )
 
             payload = _dump_tool_payload(result)
+            _emit_custom(
+                {
+                    "event": "agent.tool.end",
+                    "name": tool_name,
+                    "tool_call_id": tool_call.get("id"),
+                    "args": tool_args,
+                    "latency_ms": elapsed * 1000,
+                    "result_summary": _summarize_tool_result(result),
+                    "result_metadata": _tool_result_metadata(result),
+                }
+            )
             retrieved_context.append(payload)
             tool_messages.append(
                 ToolMessage(
@@ -191,3 +237,52 @@ def _dump_tool_payload(result: Any) -> str:
     if isinstance(result, list):
         return json.dumps([item.model_dump() for item in result], sort_keys=True)
     return json.dumps(result.model_dump(), sort_keys=True)
+
+
+def _emit_custom(payload: dict[str, Any]) -> None:
+    try:
+        get_stream_writer()(payload)
+    except Exception:
+        # LangGraph custom writers only exist during stream-mode execution.
+        return
+
+
+def _summarize_mapping(mapping: dict[str, Any]) -> str:
+    if not mapping:
+        return "{}"
+    parts: list[str] = []
+    for key, value in mapping.items():
+        text = str(value)
+        if len(text) > 120:
+            text = f"{text[:117]}..."
+        parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
+def _summarize_tool_result(result: Any) -> str:
+    if isinstance(result, list):
+        if not result:
+            return "0 results"
+        titles = [str(getattr(item, "title", "untitled")) for item in result[:3]]
+        return f"{len(result)} result(s): " + "; ".join(titles)
+    content = getattr(result, "content", None)
+    if isinstance(content, str):
+        return f"{len(content)} character(s) fetched"
+    return "tool completed"
+
+
+def _tool_result_metadata(result: Any) -> dict[str, Any]:
+    if isinstance(result, list):
+        return {
+            "result_count": len(result),
+            "document_ids": [str(getattr(item, "document_id", "")) for item in result],
+        }
+    metadata: dict[str, Any] = {}
+    for key in ("document_id", "chunk_id"):
+        value = getattr(result, key, None)
+        if value is not None:
+            metadata[key] = str(value)
+    content = getattr(result, "content", None)
+    if isinstance(content, str):
+        metadata["content_chars"] = len(content)
+    return metadata
