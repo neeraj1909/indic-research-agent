@@ -11,6 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock README.md alembic.ini chainlit.md ./
+COPY .chainlit ./.chainlit
 COPY migrations ./migrations
 COPY scripts ./scripts
 COPY src ./src
