@@ -1,179 +1,947 @@
 # indic-research-agent
 
-BM25-first AI research agent using query-kit, LiteLLM, LangGraph, Chainlit,
-PostgreSQL, Redis, SQLAlchemy, and Docker.
+`indic-research-agent` is a BM25-first research assistant with a Chainlit web UI,
+LangGraph tool orchestration, LiteLLM model access, query-kit public research
+search, PostgreSQL persistence, and Redis-backed caching.
 
-The active implementation plan is:
+The project is intentionally keyword/BM25-first. It does **not** use embeddings,
+vector databases, `pgvector`, FAISS, Chroma, Milvus, Weaviate, Pinecone,
+sentence-transformers, or embedding API calls. A unit test guards against adding
+common vector/embedding packages as direct dependencies.
 
-`/home/neeraj/prp-plans/indic-research-agent/2026-05-05-chainlit-streaming-persistence-auth-plan.md`
+## Table of contents
 
-## Design Constraint
+- [Project overview](#project-overview)
+- [Architecture](#architecture)
+- [Repository structure](#repository-structure)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the application](#running-the-application)
+- [Usage guide](#usage-guide)
+- [Testing and validation](#testing-and-validation)
+- [Development guide](#development-guide)
+- [Deployment notes](#deployment-notes)
+- [Troubleshooting](#troubleshooting)
+- [Security notes](#security-notes)
+- [Contributing](#contributing)
+- [License](#license)
 
-Retrieval starts with BM25 and keyword-based search. Do not add embeddings,
-vector databases, or embedding model dependencies unless a later plan records
-evidence that BM25 is insufficient.
+## Project overview
 
-The unit suite includes a direct-dependency guard for common vector and
-embedding packages.
+### What it does
 
-## Cache Policy
+The application answers research questions by combining:
 
-Redis cache namespaces have explicit TTLs in
-`src/indic_research_agent/services/cache_policy.py`. Document changes invalidate
-the `tool.search` and `tool.fetch` namespaces.
+1. local keyword retrieval over document chunks using BM25;
+2. public research search through `query-kit` providers;
+3. a LangGraph tool-calling loop with `search` and `fetch` tools;
+4. a LiteLLM-compatible chat model for synthesis;
+5. a Chainlit UI with local password auth, resumable chat history, progress
+   steps, and answer streaming/fallback updates.
 
-## Chainlit Auth, History, and Runtime Scope
+### Core use cases
 
-Chainlit requires both authentication and a data layer before chat history can be
-shown and resumed. Local/e2e auth uses `CHAINLIT_AUTH_USERNAME=test` and
-`CHAINLIT_AUTH_PASSWORD=test1234`; these credentials are not a production auth
-story. `CHAINLIT_AUTH_SECRET` must be set so Chainlit can sign auth cookies.
+- Explore a small local document corpus without vector infrastructure.
+- Search public research providers through query-kit from the same agent flow.
+- Evaluate BM25-first retrieval and tool-calling behavior with deterministic
+  tests and smoke scripts.
+- Run a local Chainlit chat surface that shows progress while long research
+  calls execute.
+- Persist Chainlit chat history separately from app audit tables.
 
-Chainlit history uses `CHAINLIT_DATABASE_URL` and the isolated
-`CHAINLIT_DATABASE_SCHEMA=chainlit` schema in the same Postgres service. This
-keeps Chainlit's required `users`, `threads`, `steps`, `elements`, and
-`feedbacks` tables separate from the app's public tables.
+### High-level capabilities
 
-The SQLAlchemy data layer persists text messages, steps, thread metadata, and
-history. No S3/Azure/GCS storage provider is configured, so binary Chainlit
-elements/uploads are not durable; uploads are restricted to text, Markdown, PDF,
-JSON, and CSV for local experimentation.
+| Capability | Current implementation |
+| --- | --- |
+| Web UI | Chainlit app in `src/indic_research_agent/ui/chainlit_app.py`. |
+| Authentication | Chainlit password auth via `AuthService`; local/e2e user defaults to `test` / `test1234`. |
+| Chat history | Chainlit SQLAlchemy data layer backed by PostgreSQL schema `chainlit`; `@cl.on_chat_resume` restores runtime state. |
+| Streaming/progress | Agent emits framework-neutral events; Chainlit renders progress `Step`s and streams answer text when chunks are available. |
+| Retrieval | In-memory BM25 index over seed chunks for the default UI graph; database-backed chunks are available through services and smoke tests. |
+| Public research search | `QueryKitService` wraps `query-kit` providers. |
+| Persistence/audit | App tables store users, documents, chunks, queries, tool calls, responses, and cache metadata. |
+| Cache | Redis JSON cache for query-kit/tool results, with namespace TTL policy. |
+| Model provider | LiteLLM via `langchain-litellm`; optional OpenAI-compatible streaming proxy adapter for `chatgpt/*` model IDs. |
+| Docker | Compose starts app, PostgreSQL, and Redis; the app runs Alembic migrations before Chainlit. |
 
-Chainlit listens on `/ws/socket.io`. Redis is currently the app/tool cache only:
-Chainlit 2.11.1 creates its Socket.IO server without an `AsyncRedisManager`, so
-this Compose deployment should run a single app replica. Do not place multiple
-app replicas behind a non-sticky load balancer. If multi-replica Chainlit is
-needed later, evaluate sticky sessions, WebSocket-only transport if Chainlit
-exposes it safely, or an upstream-supported Redis manager in a separate PRP.
+## Architecture
 
-## Development
+### Main components
+
+| Layer | Files | Responsibility |
+| --- | --- | --- |
+| Chainlit UI adapter | `src/indic_research_agent/ui/chainlit_app.py`, `src/indic_research_agent/ui/chainlit_stream_renderer.py` | Defines Chainlit callbacks, password auth callback, data-layer callback, session setup/resume, and rendering of service events as messages/steps. |
+| Controller | `src/indic_research_agent/controllers/chat_controller.py` | Thin UI-facing boundary. Holds JSON-safe message history/session metadata and delegates to `AgentService`. |
+| Agent service | `src/indic_research_agent/services/agent_service.py`, `src/indic_research_agent/services/agent_events.py` | Converts chat history into LangChain messages, streams LangGraph events, preserves the one-shot `answer()` API, and optionally records query/tool/response audit rows. |
+| LangGraph agent | `src/indic_research_agent/agent/graph.py`, `state.py`, `prompts.py`, `llm.py`, `openai_streaming.py` | Builds the LLM/tool loop, binds tools, emits custom progress events, and creates the LiteLLM-backed model. |
+| Tools | `src/indic_research_agent/tools/search.py`, `fetch.py`, `schemas.py` | Typed `search` and `fetch` tool implementations. |
+| Retrieval | `src/indic_research_agent/retrieval/` | BM25 tokenizer/index, search/fetch contracts, and seed corpus. |
+| External research | `src/indic_research_agent/services/querykit_service.py` | Async wrapper around `query-kit` search providers with fallback behavior. |
+| Persistence | `src/indic_research_agent/models/`, `repositories/`, `services/query_service.py`, `services/document_service.py` | SQLAlchemy models/repositories and service APIs for app-owned audit/document/cache data. |
+| Chainlit persistence | `src/indic_research_agent/services/chainlit_data_layer.py`, `migrations/versions/20260505_0002_chainlit_schema.py`, `20260505_0003_chainlit_step_autocollapse.py` | Chainlit SQLAlchemy data layer configured with Postgres `search_path=chainlit` and its required tables. |
+| Cache | `src/indic_research_agent/services/cache_service.py`, `cache_policy.py` | Redis-backed JSON cache and namespace TTL policy. |
+
+### Runtime data flow
+
+```text
+Browser
+  -> Chainlit authenticated session
+  -> Chainlit callbacks in ui/chainlit_app.py
+  -> ChatController
+  -> AgentService.stream_answer(...)
+  -> LangGraph graph.astream(stream_mode=["updates", "messages", "custom"])
+  -> LiteLLM chat model
+  -> search/fetch tools
+  -> local BM25 SearchService and/or query-kit public providers
+  -> AgentStreamEvent objects
+  -> Chainlit Message.stream_token(...) and Step progress UI
+  -> Chainlit history tables in schema chainlit
+  -> optional app audit rows in public queries/tool_calls/agent_responses
+```
+
+### Agent workflow
+
+The system prompt in `src/indic_research_agent/agent/prompts.py` instructs the
+agent to:
+
+- use search before factual research answers;
+- use `fetch` when a local search result needs more detail;
+- prefer grounded answers with source identifiers;
+- not claim semantic/vector retrieval was used;
+- search both local BM25 and query-kit public providers by default with
+  `source="all"`.
+
+The graph in `src/indic_research_agent/agent/graph.py` has two nodes:
+
+1. `llm`: calls the bound LiteLLM/LangChain chat model.
+2. `tools`: executes requested `search` or `fetch` tool calls.
+
+The loop stops when there are no tool calls or `max_tool_calls` is reached
+(default: `6`).
+
+Important current behavior:
+
+- `search` can use `source="local"`, `source="research"`, or `source="all"`.
+- `fetch` only fetches local document IDs/chunks from `SearchService`; it is not
+  for query-kit result IDs.
+- The default Chainlit agent currently uses `create_seed_search_service()`, so
+  its local BM25 index is the built-in seed corpus. Database-backed document
+  ingestion exists in `DocumentService` and is exercised by smoke/integration
+  tests, but loading persisted documents into the default Chainlit graph is not
+  currently wired as a runtime feature.
+
+### Chainlit integration
+
+`src/indic_research_agent/ui/chainlit_app.py` defines:
+
+- `@cl.data_layer`: returns a cached `SQLAlchemyDataLayer` from
+  `get_chainlit_data_layer()`.
+- `@cl.password_auth_callback`: verifies local credentials via `AuthService` and
+  returns a Chainlit `User` on success.
+- `@cl.on_chat_start`: initializes JSON-safe session state.
+- `@cl.on_chat_resume`: rehydrates controller/session state from Chainlit thread
+  metadata or persisted message steps.
+- `@cl.on_message`: creates a response message immediately, consumes
+  `ChatController.stream_message(...)`, and delegates rendering to
+  `ChainlitStreamRenderer`.
+
+Chainlit UI configuration lives in `.chainlit/config.toml`.
+
+### Streaming behavior
+
+Streaming is split into two layers:
+
+1. **Service layer:** `AgentService.stream_answer(...)` yields typed,
+   framework-neutral events from `src/indic_research_agent/services/agent_events.py`:
+   - `AgentRunStarted`
+   - `AgentProgress`
+   - `AgentToolStarted`
+   - `AgentToolFinished`
+   - `AgentToken`
+   - `AgentCompleted`
+   - `AgentFailed`
+
+2. **UI layer:** `ChainlitStreamRenderer` converts those events into Chainlit
+   `Message` and `Step` updates.
+
+The UI always shows progress for request receipt, LLM calls, tool start/end,
+final synthesis, completion, and errors. Answer text is streamed when the
+selected LangGraph/model path yields message chunks; otherwise Chainlit still
+shows progress and updates the final message from `AgentCompleted.answer`.
+
+### Persistence and session handling
+
+There are two PostgreSQL persistence namespaces:
+
+| Namespace | Tables | Purpose |
+| --- | --- | --- |
+| public app schema | `users`, `documents`, `document_chunks`, `queries`, `tool_calls`, `agent_responses`, `cache_metadata` | App-owned domain/audit/cache metadata. |
+| `chainlit` schema | `users`, `threads`, `steps`, `elements`, `feedbacks` | Chainlit data layer for authenticated users, chat history, steps, thread metadata, and feedback. |
+
+Why separate schemas? Chainlit requires a `users` table with a different shape
+from the app's public `users` table. The Chainlit data layer sets Postgres
+`search_path` to `CHAINLIT_DATABASE_SCHEMA` (default: `chainlit`) to avoid table
+collisions.
+
+Runtime session details:
+
+- Chainlit persists thread metadata on websocket disconnect.
+- The app stores only JSON-safe session values such as `message_history`,
+  `app_session_id`, `chainlit_thread_id`, and `user_identifier`.
+- Runtime objects (`ChatController`, graph instances, database sessions, model
+  clients) are recreated on chat start/resume/message.
+- UI requests can also record app audit rows with the Chainlit thread/session ID
+  in `queries.session_id`.
+
+Binary elements/uploads: the SQLAlchemy data layer is configured without an S3,
+Azure, or GCS storage provider. Text messages, steps, thread metadata, and
+history persist; uploaded/binary Chainlit elements are not durable. The current
+Chainlit config restricts spontaneous uploads to text, Markdown, PDF, JSON, and
+CSV with small local-development limits.
+
+### Authentication flow
+
+Local/e2e auth uses `AuthService` in
+`src/indic_research_agent/services/auth_service.py`:
+
+1. Chainlit serves `/login` when auth is enabled.
+2. The password callback compares submitted credentials with
+   `CHAINLIT_AUTH_USERNAME` and `CHAINLIT_AUTH_PASSWORD` using timing-safe
+   comparison.
+3. On success, Chainlit creates a signed auth cookie using
+   `CHAINLIT_AUTH_SECRET`.
+4. On login, Chainlit creates/updates the persisted Chainlit user row in the
+   `chainlit.users` table.
+
+Default local/e2e credentials are `test` / `test1234`. They are not production
+credentials.
+
+### External services and providers
+
+| Service/provider | Used for | Required for |
+| --- | --- | --- |
+| PostgreSQL | App tables and Chainlit history. | Integration tests, e2e smoke, Docker runtime, resumable Chainlit history. |
+| Redis | JSON cache for query-kit/tool results. | Cache tests and smoke query cache validation. Not used for Chainlit Socket.IO scaling. |
+| LiteLLM / OpenAI-compatible model | Final answer synthesis and tool-calling decisions. | Live Chainlit answers. Deterministic tests can run without live model credentials. |
+| query-kit | Public research provider search. | Research-source search from the default agent. Provider-specific credentials are not documented in this repo. |
+
+## Repository structure
+
+```text
+.
+├── .chainlit/config.toml             # Chainlit runtime/UI config
+├── .env.example                      # Example environment variables
+├── AGENTS.md                         # Coding-agent instructions and active PRP pointer
+├── alembic.ini                       # Alembic configuration
+├── compose.yaml                      # Docker Compose app + Postgres + Redis
+├── Dockerfile                        # App image build
+├── docs/architecture.md              # Short architecture map
+├── migrations/                       # Alembic environment and revisions
+├── scripts/
+│   ├── migrate.sh                    # Runs Alembic upgrade head
+│   ├── start_app.sh                  # Runs migrations then Chainlit
+│   └── smoke_query.py                # Deterministic end-to-end BM25/tool/cache smoke
+├── src/indic_research_agent/
+│   ├── agent/                        # LangGraph graph, prompt, model factory/adapters
+│   ├── controllers/                  # UI-facing controller boundary
+│   ├── db/                           # Async SQLAlchemy engine/session helpers
+│   ├── models/                       # SQLAlchemy ORM models
+│   ├── repositories/                 # Persistence repository classes
+│   ├── retrieval/                    # BM25 index and search contracts
+│   ├── services/                     # App orchestration and external service adapters
+│   ├── tools/                        # Search/fetch tools and schemas
+│   └── ui/                           # Chainlit adapter and stream renderer
+└── tests/
+    ├── e2e/                          # Live/smoke end-to-end tests
+    ├── integration/                  # Postgres/Redis integration tests
+    └── unit/                         # Fast unit tests
+```
+
+## Prerequisites
+
+### Required
+
+- Python `3.12` (`pyproject.toml` requires `>=3.12,<3.13`; `.python-version`
+  contains `3.12`).
+- [`uv`](https://docs.astral.sh/uv/) for dependency management and command
+  execution.
+- `git`, because the project depends on `query-kit` from
+  `git+https://github.com/neeraj1909/query-kit.git`.
+
+### Required for full runtime/integration tests
+
+- PostgreSQL reachable with an asyncpg SQLAlchemy URL.
+- Redis reachable with a Redis URL.
+- Docker/Compose if using the provided container stack.
+
+### Required for live model answers
+
+At least one model provider path must be configured. The code supports:
+
+- LiteLLM/LangChain via `langchain-litellm` settings such as `LITELLM_MODEL`,
+  `LITELLM_API_KEY`, and `LITELLM_API_BASE`.
+- Native provider env vars such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`,
+  depending on the chosen LiteLLM model/provider.
+- An OpenAI-compatible streaming proxy path for `chatgpt/*` model IDs when
+  `LITELLM_STREAMING=true`, `LITELLM_API_BASE` is set, and an API key is set.
+
+## Installation
+
+### 1. Clone and enter the repository
+
+```bash
+git clone <repository-url>
+cd indic-research-agent
+```
+
+Replace `<repository-url>` with the actual repository URL you use. The README
+cannot verify a canonical clone URL from the source tree alone.
+
+### 2. Install dependencies
 
 ```bash
 uv sync
-uv run python -c "import indic_research_agent; import query_cli"
-uv run ruff format . && uv run ruff check --fix .
-timeout 60 uv run pytest -m unit --no-cov
 ```
 
-See `docs/architecture.md` for the module map and current runtime flow.
+This creates/updates `.venv/` and installs runtime and dev dependencies from
+`pyproject.toml` and `uv.lock`.
 
-## Run
-
-Set the LiteLLM provider environment variables for your selected model, then
-start the Chainlit UI:
+### 3. Create local environment file
 
 ```bash
 cp .env.example .env
-uv run chainlit run src/indic_research_agent/ui/chainlit_app.py -w
 ```
 
-For a no-network adapter smoke check:
+Edit `.env` with your model provider values and, for non-local use, replace the
+Chainlit auth secret/credentials.
+
+### 4. Verify imports
 
 ```bash
-uv run python -m indic_research_agent.agent.llm --smoke
+uv run python -c "import indic_research_agent; import query_cli"
 ```
 
-## Docker
+## Configuration
+
+Configuration is loaded by `AppSettings` in `src/indic_research_agent/config.py`.
+It reads environment variables and `.env` with `extra="ignore"`.
+
+### Environment variables
+
+| Variable | Default / example | Purpose |
+| --- | --- | --- |
+| `APP_NAME` | `indic-research-agent` | Application name. |
+| `ENVIRONMENT` | `development` | Environment label. |
+| `LOG_LEVEL` | `INFO` | Intended log level setting. Logging configuration is otherwise framework/default-driven. |
+| `APP_DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent` | App SQLAlchemy URL. Preferred over `DATABASE_URL` for app tables. |
+| `DATABASE_URL` | none | Accepted as fallback alias for app DB URL. Avoid relying on it for Chainlit; use `CHAINLIT_DATABASE_URL` explicitly. |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis cache URL. |
+| `QUERY_KIT_PROVIDERS` | `all` | Comma-separated provider IDs; known examples in `.env.example`: `acl`, `arxiv`, `pubmed`, `semantic-scholar`, `openreview`, `all`. |
+| `QUERY_KIT_TIMEOUT_SECONDS` | `30` | Timeout passed to query-kit provider factory. |
+| `LITELLM_MODEL` | code default `openai/gpt-4o-mini`; `.env.example` uses `chatgpt/gpt-5.5` | Model ID for LiteLLM/LangChain. |
+| `LITELLM_CUSTOM_LLM_PROVIDER` | none | Optional LiteLLM custom provider name. |
+| `LITELLM_API_KEY` | none | Optional API key passed to LiteLLM or the OpenAI-compatible adapter. |
+| `LITELLM_API_BASE` | none | Optional API base/proxy URL. |
+| `LITELLM_TEMPERATURE` | `0.2` | Model temperature. |
+| `LITELLM_TIMEOUT_SECONDS` | `30` | Model request timeout. |
+| `LITELLM_MAX_TOKENS` | `1200` in code; Compose/.env example use `25600` | Maximum model output tokens when supported. |
+| `LITELLM_STREAMING` | `true` | Enables streaming-oriented model configuration. |
+| `OPENAI_API_KEY` | none | Native provider env var that LiteLLM may use. |
+| `ANTHROPIC_API_KEY` | none | Native provider env var that LiteLLM may use. |
+| `CHAINLIT_AUTH_SECRET` | no code default; Compose/.env example use a dev-only value | Required by Chainlit to sign auth cookies when auth is enabled. Replace in non-local environments. |
+| `CHAINLIT_AUTH_ENABLED` | `true` | Enables local password credential verification. |
+| `CHAINLIT_AUTH_USERNAME` | `test` | Local/e2e username. |
+| `CHAINLIT_AUTH_PASSWORD` | `test1234` | Local/e2e password. |
+| `CHAINLIT_DATABASE_URL` | same local Postgres URL by default | SQLAlchemy URL for Chainlit's data layer. |
+| `CHAINLIT_DATABASE_SCHEMA` | `chainlit` | Postgres schema used for Chainlit tables/search path. |
+| `CHAINLIT_DATA_LAYER_SHOW_LOGGER` | `false` | Enables Chainlit SQLAlchemy data-layer logging if set truthy. |
+| `COMPOSE_PROJECT_NAME` | `indic-research-agent` in `.env.example` | Compose project name. |
+
+### Example local `.env`
+
+```dotenv
+APP_NAME=indic-research-agent
+ENVIRONMENT=development
+LOG_LEVEL=INFO
+
+# Model provider. Fill these in for live UI answers.
+LITELLM_MODEL=openai/gpt-4o-mini
+LITELLM_CUSTOM_LLM_PROVIDER=
+LITELLM_API_KEY=
+LITELLM_API_BASE=
+LITELLM_TEMPERATURE=0.2
+LITELLM_TIMEOUT_SECONDS=30
+LITELLM_MAX_TOKENS=25600
+LITELLM_STREAMING=true
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+
+# Research providers.
+QUERY_KIT_PROVIDERS=all
+QUERY_KIT_TIMEOUT_SECONDS=30
+
+# Local services.
+APP_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent
+REDIS_URL=redis://localhost:6379/0
+
+# Chainlit local/e2e auth and history.
+CHAINLIT_AUTH_SECRET=replace-with-a-long-random-secret
+CHAINLIT_AUTH_ENABLED=true
+CHAINLIT_AUTH_USERNAME=test
+CHAINLIT_AUTH_PASSWORD=test1234
+CHAINLIT_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent
+CHAINLIT_DATABASE_SCHEMA=chainlit
+```
+
+### Chainlit settings
+
+`.chainlit/config.toml` controls UI/session behavior. Notable current settings:
+
+- `session_timeout = 3600`
+- `user_session_timeout = 1296000` (15 days)
+- `persist_user_env = false`
+- `mask_user_env = false`
+- `allow_origins = ["*"]` (review before production)
+- `features.spontaneous_file_upload.enabled = true`
+- upload accept list: text, Markdown, PDF, JSON, CSV
+- `UI.name = "Indic Research Agent"`
+- `UI.cot = "full"`, so progress/tool steps are visible
+
+## Running the application
+
+### Option A: Docker Compose (recommended for the full stack)
 
 ```bash
+cp .env.example .env
+# Edit .env with model provider values and a unique CHAINLIT_AUTH_SECRET.
 docker compose up --build
 ```
 
-The app container runs `scripts/migrate.sh` before starting Chainlit. Local
-Chainlit auth is enabled with the e2e/dev account `test` / `test1234`; set a
-unique `CHAINLIT_AUTH_SECRET` and replace these credentials before any
-non-local deployment. Chainlit conversation history uses Postgres through
-`CHAINLIT_DATABASE_URL` and stores Chainlit tables in the isolated `chainlit`
-schema.
-
-For a deterministic end-to-end smoke query without live LLM credentials:
+The app container runs:
 
 ```bash
-docker compose up -d postgres redis
-uv run alembic upgrade head
-uv run python scripts/smoke_query.py --question "How does BM25 retrieval support this agent?"
-docker compose down -v
+sh scripts/migrate.sh
+uv run --no-sync chainlit run src/indic_research_agent/ui/chainlit_app.py --headless --host 0.0.0.0 --port 8000
 ```
 
-The smoke script seeds a PostgreSQL document, builds a BM25 index, runs
-LangGraph search/fetch tool calls, repeats the calls to prove Redis cache hits,
-persists tool-call and response records, and prints a JSON summary.
-
-## Verify It Works
-
-Check the running containers:
+Expected services:
 
 ```bash
 docker compose ps
 ```
 
-Expected: `app` is up, `postgres` is healthy, and `redis` is healthy. The UI is
-available at:
+- `app` listening on `http://localhost:8000`
+- `postgres` healthy on localhost port `5432`
+- `redis` healthy on localhost port `6379`
+
+### Option B: Local Chainlit process with separately running services
+
+Start PostgreSQL and Redis first. One convenient way is:
+
+```bash
+docker compose up -d postgres redis
+```
+
+Then run migrations and Chainlit locally:
+
+```bash
+cp .env.example .env
+# Edit .env.
+uv sync
+uv run alembic upgrade head
+uv run chainlit run src/indic_research_agent/ui/chainlit_app.py -w
+```
+
+Open:
 
 ```text
 http://localhost:8000
 ```
 
-Run the full local validation loop:
+With auth enabled, Chainlit redirects to `/login`.
+
+### Alternative entry points
+
+Dry-run model adapter smoke (does not call a live provider):
 
 ```bash
-uv run ruff format . && uv run ruff check --fix .
-timeout 60 uv run pytest -m unit --no-cov
-APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' REDIS_URL='redis://localhost:6379/0' uv run pytest -m integration
-APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' REDIS_URL='redis://localhost:6379/0' uv run pytest -m e2e
+uv run python -m indic_research_agent.agent.llm --smoke
 ```
 
-Run a deterministic smoke query against PostgreSQL and Redis:
+Live model smoke:
 
 ```bash
+uv run python -m indic_research_agent.agent.llm --smoke --live --prompt "Reply with OK."
+```
+
+Deterministic end-to-end smoke query without live model credentials:
+
+```bash
+docker compose up -d postgres redis
+APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
+REDIS_URL='redis://localhost:6379/0' \
+uv run alembic upgrade head
 APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
 REDIS_URL='redis://localhost:6379/0' \
 uv run python scripts/smoke_query.py --question "How does BM25 retrieval support this agent?"
 ```
 
-Expected smoke output is JSON with a non-empty `answer`, `tool_call_count` of
-`2`, `persisted_tool_calls` of at least `2`, and `cache_hits` of at least `2`.
+Expected smoke output is JSON with a non-empty `answer`, a `tool_call_count` of
+`2`, at least `2` persisted tool calls, and at least `2` Redis cache hits.
 
-Inspect app logs:
+## Usage guide
 
-```bash
-docker compose logs -f app
-```
+### Login
 
-For a live UI check, ask Chainlit:
+1. Open `http://localhost:8000`.
+2. Sign in with the configured local/e2e credentials.
+   - Defaults: `test` / `test1234`.
+   - Chainlit may label the username field as an email field, but the app passes
+     the value to `CHAINLIT_AUTH_USERNAME`.
+
+### Asking questions
+
+Example prompts:
 
 ```text
 How does this agent use BM25 and query-kit?
 ```
 
-Live UI answers require valid LiteLLM credentials in `.env`. Do not commit or
-share `.env`.
+```text
+Find research related to keyword retrieval for AI assistants.
+```
+
+The UI creates a response immediately, then shows progress steps such as:
+
+- request received;
+- LLM call;
+- search/fetch tool start/end;
+- final synthesis;
+- answer finalized;
+- completed or failed.
+
+If the model/tool path emits answer chunks, the response streams into the
+message. If not, the final answer is still displayed once the run completes.
+
+### Chat history and resume
+
+With auth and the Chainlit data layer enabled:
+
+- prior threads are visible in Chainlit history;
+- a thread can be resumed after reload or container restart when using the same
+  Postgres volume/data;
+- model context is restored from JSON-safe `message_history` metadata when
+  available, or reconstructed best-effort from persisted user/assistant message
+  steps.
+
+### Inputs and outputs
+
+- Input: normal text chat messages.
+- Optional uploads are allowed by Chainlit config for text, Markdown, PDF, JSON,
+  and CSV. No custom upload-processing pipeline is currently implemented in the
+  agent code.
+- Output: Chainlit assistant message plus progress/tool steps. App audit rows
+  are written when UI persistence is enabled.
+
+## Testing and validation
+
+Pytest markers are configured in `pyproject.toml`:
+
+- `unit`: fast unit tests;
+- `integration`: tests requiring external services or process-level integration;
+- `e2e`: end-to-end application smoke tests.
+
+### Static checks
+
+```bash
+uv run python -m compileall src migrations scripts
+uv run ruff format .
+uv run ruff check --fix .
+```
+
+No separate type checker is configured in this repository.
+
+### Unit tests
+
+```bash
+timeout 60 uv run pytest -m unit --no-cov
+```
+
+Unit coverage includes BM25 behavior, tool schemas/tools, query-kit wrapper
+fallbacks, auth, chat history, controller delegation, stream event mapping,
+LangGraph streaming, Chainlit callback helpers, and the no-vector-dependency
+policy.
+
+### Integration tests
+
+Requires PostgreSQL and Redis for the full integration suite:
+
+```bash
+docker compose up -d postgres redis
+APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
+REDIS_URL='redis://localhost:6379/0' \
+uv run pytest -m integration
+```
+
+Integration tests cover:
+
+- database-backed BM25 roundtrip;
+- Redis cache behavior;
+- repository roundtrip;
+- Chainlit schema migration isolation;
+- UI-style query/tool/response audit persistence.
+
+### E2E tests
+
+With the app running at `http://localhost:8000`:
+
+```bash
+APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
+REDIS_URL='redis://localhost:6379/0' \
+uv run pytest -m e2e
+```
+
+`tests/e2e/test_chainlit_auth_persistence.py` also respects:
+
+```bash
+CHAINLIT_BASE_URL=http://localhost:8000
+```
+
+E2E coverage includes:
+
+- `/auth/config` showing password auth enabled;
+- `/login` with `test` / `test1234`;
+- `/user` returning identifier `test`;
+- `/project/settings?language=en-US` showing `dataPersistence=true` and
+  `threadResumable=true`;
+- deterministic smoke query through the BM25/tool/cache/persistence stack;
+- service-level streaming smoke.
+
+### Full local validation loop
+
+```bash
+uv run python -m compileall src migrations scripts
+uv run ruff format . && uv run ruff check --fix .
+timeout 60 uv run pytest -m unit --no-cov
+docker compose up -d postgres redis
+APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
+REDIS_URL='redis://localhost:6379/0' \
+uv run pytest -m integration
+docker compose up -d --build app
+APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
+REDIS_URL='redis://localhost:6379/0' \
+uv run pytest -m e2e
+git diff --check
+```
+
+## Development guide
+
+### Coding conventions
+
+- Python target: 3.12.
+- Formatting/linting: Ruff (`line-length = 88`, double quotes, import sorting,
+  selected lint rules `E`, `F`, `I`, `UP`, `B`, `SIM`).
+- Keep Chainlit-specific imports in UI/adapter modules where possible.
+- Keep retrieval logic testable without an LLM.
+- Maintain BM25/keyword-first retrieval unless a future plan records evidence to
+  add vector/embedding infrastructure.
+
+### Adding or modifying tools
+
+1. Add or update input/output schemas in `src/indic_research_agent/tools/schemas.py`.
+2. Implement the tool class in `src/indic_research_agent/tools/`.
+3. Register it in `build_agent_graph()` / `_create_langchain_tools()` in
+   `src/indic_research_agent/agent/graph.py`.
+4. Emit custom progress with `_emit_custom(...)` if the UI should display
+   tool-specific progress.
+5. Add unit tests under `tests/unit/tools/` and graph tests under
+   `tests/unit/agent/`.
+6. If tool results should be audited, update the `AgentToolFinished` metadata
+   mapping in `AgentService`/graph helpers and integration tests.
+
+### Changing prompts or agent behavior
+
+- Main system prompt: `src/indic_research_agent/agent/prompts.py`.
+- LangGraph routing/tool loop: `src/indic_research_agent/agent/graph.py`.
+- Model factory and provider behavior: `src/indic_research_agent/agent/llm.py`.
+- OpenAI-compatible proxy adapter: `src/indic_research_agent/agent/openai_streaming.py`.
+
+After changing behavior, run at least:
+
+```bash
+uv run pytest tests/unit/agent tests/unit/services/test_agent_service_streaming.py -q
+```
+
+### Changing Chainlit UI behavior
+
+- Chainlit lifecycle/auth/data-layer callbacks: `src/indic_research_agent/ui/chainlit_app.py`.
+- Stream rendering: `src/indic_research_agent/ui/chainlit_stream_renderer.py`.
+- Chainlit runtime config: `.chainlit/config.toml`.
+
+Keep UI rendering separate from graph orchestration. The UI should consume
+`AgentStreamEvent` objects rather than parsing raw LangGraph chunks.
+
+### Adding persistence/auth features
+
+- App domain models live in `src/indic_research_agent/models/` and public
+  Alembic migrations.
+- App repositories live in `src/indic_research_agent/repositories/`.
+- App persistence services live in `src/indic_research_agent/services/`.
+- Chainlit's data-layer schema lives in the `chainlit` Postgres schema; do not
+  reuse the public `users` table for Chainlit auth/history.
+- Add Alembic migrations for database changes and integration tests that verify
+  the new schema.
+
+### Logging and debugging tips
+
+- LangGraph logs progress with names like `agent.llm.start`, `agent.llm.end`,
+  `agent.tool.start`, and `agent.tool.end`.
+- Chainlit UI logs message lifecycle events from `chainlit_app.py`.
+- App persistence errors in the stream path are logged and do not crash the UI
+  response by default.
+- Docker logs:
+
+```bash
+docker compose logs -f app
+```
+
+- Verify rendered Chainlit auth/settings without browser selectors:
+
+```bash
+curl -fsS http://localhost:8000/auth/config | jq .
+curl -fsS http://localhost:8000/project/settings?language=en-US | jq '{dataPersistence,threadResumable}'
+```
+
+## Deployment notes
+
+### Docker image
+
+The `Dockerfile` uses `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, installs
+`git`, copies `.chainlit`, `migrations`, `scripts`, and `src`, runs
+`uv sync --frozen --no-dev`, and starts with `scripts/start_app.sh`.
+
+### Database migrations
+
+The app runs `uv run --no-sync alembic upgrade head` before starting Chainlit in
+Docker. Fresh Compose startup creates:
+
+- public app tables from `20260505_0001_initial_schema.py`;
+- Chainlit schema/tables from `20260505_0002_chainlit_schema.py`;
+- Chainlit `steps."autoCollapse"` compatibility column from
+  `20260505_0003_chainlit_step_autocollapse.py`.
+
+### Secrets and production auth
+
+For any non-local deployment:
+
+- replace `CHAINLIT_AUTH_SECRET` with a long random secret;
+- replace `CHAINLIT_AUTH_USERNAME` / `CHAINLIT_AUTH_PASSWORD` or implement a
+  production auth callback/provider;
+- do not commit `.env`;
+- provide model provider secrets through the deployment platform secret store.
+
+### Chainlit Socket.IO and Redis
+
+Chainlit serves browser realtime traffic under `/ws/socket.io`. The current app
+uses Redis for app/tool caching only. Chainlit 2.11.1 initializes Socket.IO
+without an `AsyncRedisManager`, so Redis does **not** provide Chainlit
+multi-replica websocket/polling state.
+
+Current deployment recommendation:
+
+- run a single app replica; or
+- if deploying multiple replicas later, design sticky sessions, WebSocket-only
+  transport, or upstream-supported Socket.IO Redis-manager integration in a
+  separate architecture change.
+
+### Uploads/elements
+
+No Chainlit storage provider is configured. SQL persistence covers text
+messages/steps/history, not durable binary elements. If production uploads are
+required, add a supported storage provider and test element persistence before
+raising upload size/type limits.
 
 ## Troubleshooting
 
-If the UI returns an error like `You didn't provide an API key`, verify that the
-running container has the current `.env` values:
+### `You didn't provide an API key` or model auth errors
+
+Check which model variables are visible in the app container without printing
+secret values:
 
 ```bash
-docker compose exec -T app sh -lc 'for name in LITELLM_MODEL LITELLM_API_KEY LITELLM_API_BASE; do eval value=${$name-}; if [ -n "$value" ]; then echo "$name=SET"; else echo "$name=EMPTY"; fi; done'
+docker compose exec -T app sh -lc 'for name in LITELLM_MODEL LITELLM_API_KEY LITELLM_API_BASE OPENAI_API_KEY ANTHROPIC_API_KEY; do eval value=${$name-}; if [ -n "$value" ]; then echo "$name=SET"; else echo "$name=EMPTY"; fi; done'
 ```
 
-If `LITELLM_API_KEY` or `LITELLM_API_BASE` is `EMPTY`, recreate the app
-container after updating `.env`:
+After changing `.env`, recreate the app container:
 
 ```bash
 docker compose up -d --force-recreate app
 ```
 
-This reloads environment variables without printing or exposing secret values.
-
-If chat responses are slow, check the model backend first:
+Run a live model smoke:
 
 ```bash
 timeout 25 docker compose exec -T app uv run --no-sync python -m indic_research_agent.agent.llm --smoke --live --prompt "Reply with OK."
 ```
 
-If this times out or returns an upstream error, the delay is coming from the
-configured LiteLLM/API-base backend rather than Chainlit. The agent's LangGraph
-search tool defaults to `source="all"`, so chat answers use both local BM25
-retrieval and query-kit public research search.
+If this fails, the issue is likely model/provider configuration rather than
+Chainlit.
+
+### Chainlit login does not appear or `/auth/config` has auth disabled
+
+Verify that the app imported `chainlit_app.py` and that auth env vars are set:
+
+```bash
+curl -fsS http://localhost:8000/auth/config | jq .
+docker compose exec -T app sh -lc 'for name in CHAINLIT_AUTH_SECRET CHAINLIT_AUTH_ENABLED CHAINLIT_AUTH_USERNAME CHAINLIT_AUTH_PASSWORD; do eval value=${$name-}; if [ -n "$value" ]; then echo "$name=SET"; else echo "$name=EMPTY"; fi; done'
+```
+
+Expected for local auth:
+
+```json
+{
+  "requireLogin": true,
+  "passwordAuth": true
+}
+```
+
+### Login succeeds but history is not resumable
+
+Check Chainlit project settings:
+
+```bash
+curl -fsS http://localhost:8000/project/settings?language=en-US | jq '{dataPersistence,threadResumable}'
+```
+
+Expected:
+
+```json
+{
+  "dataPersistence": true,
+  "threadResumable": true
+}
+```
+
+If false, verify:
+
+- `CHAINLIT_DATABASE_URL` is set and reachable;
+- `CHAINLIT_DATABASE_SCHEMA=chainlit`;
+- migrations ran successfully;
+- `@cl.data_layer` and `@cl.on_chat_resume` are still registered in
+  `src/indic_research_agent/ui/chainlit_app.py`.
+
+### Database connection or missing table errors
+
+Run migrations explicitly:
+
+```bash
+APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
+uv run alembic upgrade head
+```
+
+Inspect key tables:
+
+```bash
+docker compose exec -T postgres psql -U postgres -d indic_research_agent -c \
+  "select to_regclass('public.queries'), to_regclass('chainlit.users'), to_regclass('chainlit.steps');"
+```
+
+### Redis/cache failures
+
+Check Redis health:
+
+```bash
+docker compose exec -T redis redis-cli ping
+```
+
+Run the Redis integration test:
+
+```bash
+REDIS_URL='redis://localhost:6379/0' uv run pytest tests/integration/test_redis_cache.py -q
+```
+
+### No progress or no streaming tokens in the UI
+
+Progress steps should appear even when token-level streaming is unavailable. If
+no progress appears:
+
+- confirm `.chainlit/config.toml` has `cot = "full"`;
+- check app logs for `agent.llm.start`, `agent.tool.start`, or
+  `agent.stream.failed`;
+- run streaming unit/e2e smoke tests:
+
+```bash
+uv run pytest tests/unit/services/test_agent_service_streaming.py tests/e2e/test_chainlit_streaming_smoke.py -q
+```
+
+If progress appears but tokens do not stream, the selected model/adapter may be
+returning a completed `AIMessage` rather than incremental chunks. The UI should
+still update with the final answer.
+
+### Query-kit provider failures
+
+`QueryKitService` retries individual fallback providers when combined provider
+search raises `ProviderSearchError`. Check logs for provider-specific warnings.
+Provider-specific credentials, quotas, and network requirements are not
+currently documented in this repository.
+
+### Slow answers
+
+The default prompt asks the agent to search both local BM25 and public research
+providers. Public provider calls can dominate latency. To narrow search, the LLM
+must choose or be prompted toward `source="local"`; there is not currently a UI
+setting for source selection.
+
+## Security notes
+
+- `.env` is ignored by git; do not commit secrets.
+- `CHAINLIT_AUTH_SECRET` signs Chainlit auth cookies. Use a strong unique value
+  outside local/e2e.
+- `test` / `test1234` is a local/e2e convenience only.
+- Chainlit `persist_user_env = false`; user-supplied environment variables are
+  not intended to be persisted.
+- `.chainlit/config.toml` currently has `allow_origins = ["*"]`; restrict this
+  before exposing the app broadly.
+- `unsafe_allow_html = false`; keep it disabled unless there is a reviewed need.
+- Chat messages, Chainlit steps, thread metadata, app query text, tool arguments,
+  tool summaries, and agent answers may be persisted in PostgreSQL. Treat the
+  database as sensitive user/research data.
+- Uploaded files are not durably stored by a configured object storage provider,
+  but users should still avoid uploading secrets or sensitive documents until a
+  reviewed ingestion/storage policy exists.
+- The no-vector-dependency guard helps preserve the BM25-first retrieval policy.
+
+## Contributing
+
+No formal branching or pull-request policy is currently documented in the repo.
+Recent commits use concise conventional-commit-style messages, but this is not
+encoded as an automated rule.
+
+Suggested workflow:
+
+1. Create a topic branch.
+2. Make focused changes with tests.
+3. Run formatting/linting and the relevant test tiers.
+4. Keep Chainlit UI code thin; put orchestration in controllers/services/agent
+   modules.
+5. Keep retrieval BM25/keyword-first unless a future PRP explicitly changes the
+   architecture.
+6. Do not add vector/embedding dependencies without updating policy/tests.
+7. Open a PR with validation output and any migration/deployment notes.
+
+Suggested PR checklist:
+
+- [ ] `uv run ruff format . && uv run ruff check --fix .`
+- [ ] `timeout 60 uv run pytest -m unit --no-cov`
+- [ ] Integration tests run when persistence/cache code changed.
+- [ ] E2E smoke run when Chainlit/auth/streaming/runtime code changed.
+- [ ] Alembic migration added for DB schema changes.
+- [ ] README/docs updated for configuration or operational changes.
+- [ ] No secrets committed.
+
+## License
+
+No license file was found in this repository at the time this README was
+written. Treat the project as unlicensed unless the repository owner adds a
+license file or otherwise documents licensing terms.
