@@ -8,8 +8,10 @@ separately.
 
 ```text
 Chainlit UI
+  -> authenticated Chainlit user session
+  -> Chainlit SQLAlchemy data layer (Postgres schema: chainlit)
   -> ChatController
-  -> AgentService
+  -> AgentService stream events
   -> LangGraph graph
   -> LiteLLM chat model
   -> SearchTool / FetchTool
@@ -50,6 +52,15 @@ prevents common vector and embedding packages from being added directly.
 - Query-kit public provider calls are wrapped but not cached until Phase 3.
 - Fetch currently supports local chunks by `document_id` and `chunk_id`.
 - Live LiteLLM calls require provider environment variables.
+- Chainlit SQLAlchemy persistence stores text messages, steps, and thread
+  metadata/history in the `chainlit` Postgres schema. Binary elements/uploads
+  need a storage provider and are not durable in this app yet.
+- Redis is used for app/tool caching only. Chainlit serves browser traffic over
+  `/ws/socket.io`, but Chainlit 2.11.1 initializes Socket.IO with
+  `socketio.AsyncServer(..., async_mode="asgi")` and no `AsyncRedisManager`.
+  Keep the Compose app as a single replica unless a later architecture change
+  adds sticky sessions, WebSocket-only transport, or an upstream-supported Redis
+  Socket.IO manager.
 
 ## Commands
 

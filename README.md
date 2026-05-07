@@ -5,7 +5,7 @@ PostgreSQL, Redis, SQLAlchemy, and Docker.
 
 The active implementation plan is:
 
-`/home/neeraj/prp-plans/indic-research-agent/2026-05-05-bm25-query-kit-langgraph-agent-plan.md`
+`/home/neeraj/prp-plans/indic-research-agent/2026-05-05-chainlit-streaming-persistence-auth-plan.md`
 
 ## Design Constraint
 
@@ -21,6 +21,30 @@ embedding packages.
 Redis cache namespaces have explicit TTLs in
 `src/indic_research_agent/services/cache_policy.py`. Document changes invalidate
 the `tool.search` and `tool.fetch` namespaces.
+
+## Chainlit Auth, History, and Runtime Scope
+
+Chainlit requires both authentication and a data layer before chat history can be
+shown and resumed. Local/e2e auth uses `CHAINLIT_AUTH_USERNAME=test` and
+`CHAINLIT_AUTH_PASSWORD=test1234`; these credentials are not a production auth
+story. `CHAINLIT_AUTH_SECRET` must be set so Chainlit can sign auth cookies.
+
+Chainlit history uses `CHAINLIT_DATABASE_URL` and the isolated
+`CHAINLIT_DATABASE_SCHEMA=chainlit` schema in the same Postgres service. This
+keeps Chainlit's required `users`, `threads`, `steps`, `elements`, and
+`feedbacks` tables separate from the app's public tables.
+
+The SQLAlchemy data layer persists text messages, steps, thread metadata, and
+history. No S3/Azure/GCS storage provider is configured, so binary Chainlit
+elements/uploads are not durable; uploads are restricted to text, Markdown, PDF,
+JSON, and CSV for local experimentation.
+
+Chainlit listens on `/ws/socket.io`. Redis is currently the app/tool cache only:
+Chainlit 2.11.1 creates its Socket.IO server without an `AsyncRedisManager`, so
+this Compose deployment should run a single app replica. Do not place multiple
+app replicas behind a non-sticky load balancer. If multi-replica Chainlit is
+needed later, evaluate sticky sessions, WebSocket-only transport if Chainlit
+exposes it safely, or an upstream-supported Redis manager in a separate PRP.
 
 ## Development
 
@@ -55,7 +79,12 @@ uv run python -m indic_research_agent.agent.llm --smoke
 docker compose up --build
 ```
 
-The app container runs `scripts/migrate.sh` before starting Chainlit.
+The app container runs `scripts/migrate.sh` before starting Chainlit. Local
+Chainlit auth is enabled with the e2e/dev account `test` / `test1234`; set a
+unique `CHAINLIT_AUTH_SECRET` and replace these credentials before any
+non-local deployment. Chainlit conversation history uses Postgres through
+`CHAINLIT_DATABASE_URL` and stores Chainlit tables in the isolated `chainlit`
+schema.
 
 For a deterministic end-to-end smoke query without live LLM credentials:
 
