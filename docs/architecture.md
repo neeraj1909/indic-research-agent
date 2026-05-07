@@ -33,7 +33,13 @@ Chainlit UI
 | `src/indic_research_agent/models/` | SQLAlchemy models, added in Phase 3. |
 | `src/indic_research_agent/repositories/` | Persistence repositories, added in Phase 3. |
 
-## Retrieval Policy
+## Prompt and Retrieval Policy
+
+The main system prompt lives in `src/indic_research_agent/agent/prompts.py` and
+is prepended by `build_agent_graph()`. It specializes the assistant for
+Indic-language and India-focused research, asks the model to use search before
+factual research answers, cites source identifiers, and logs only a prompt
+version/hash for verification.
 
 The project must not use embeddings or vector databases in the initial
 implementation. Retrieval quality should be improved with:

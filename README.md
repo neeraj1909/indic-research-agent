@@ -102,15 +102,28 @@ Browser
 
 ### Agent workflow
 
-The system prompt in `src/indic_research_agent/agent/prompts.py` instructs the
-agent to:
+The system prompt in `src/indic_research_agent/agent/prompts.py` makes the
+assistant an Indic-language and India-focused research assistant. It instructs
+the agent to:
 
-- use search before factual research answers;
-- use `fetch` when a local search result needs more detail;
-- prefer grounded answers with source identifiers;
-- not claim semantic/vector retrieval was used;
+- specialize in Indic/India research tasks such as Hindi OCR, Indian-language
+  ASR, Marathi legal text classification, Tamil passage translation/analysis,
+  and Indic evaluation benchmarks;
+- ask clarification questions only when language, script, domain, timeframe,
+  corpus, or output format would materially change the answer;
+- use `search` before factual, recent, comparative, dataset, benchmark,
+  source-finding, or literature-review answers;
 - search both local BM25 and query-kit public providers by default with
-  `source="all"`.
+  `source="all"`;
+- use `fetch` only when a local BM25 search result needs more detail, not for
+  query-kit result IDs;
+- cite source identifiers and explain evidence boundaries/uncertainty;
+- not claim semantic/vector retrieval, embeddings, or unsupported app features
+  were used.
+
+`build_agent_graph()` prepends this project prompt to every model call and
+strips incoming system messages so UI/session history cannot silently replace it.
+Runtime logs include only the prompt version/hash, not the prompt text.
 
 The graph in `src/indic_research_agent/agent/graph.py` has two nodes:
 
@@ -505,11 +518,23 @@ Expected smoke output is JSON with a non-empty `answer`, a `tool_call_count` of
 Example prompts:
 
 ```text
-How does this agent use BM25 and query-kit?
+Summarize recent research on Hindi OCR.
 ```
 
 ```text
-Find research related to keyword retrieval for AI assistants.
+Compare datasets for Indian language ASR.
+```
+
+```text
+Find sources on Marathi legal text classification.
+```
+
+```text
+Translate and analyze this Tamil passage: ...
+```
+
+```text
+Create a research brief on Indic language evaluation benchmarks.
 ```
 
 The UI creates a response immediately, then shows progress steps such as:
@@ -662,8 +687,10 @@ git diff --check
 
 ### Changing prompts or agent behavior
 
-- Main system prompt: `src/indic_research_agent/agent/prompts.py`.
-- LangGraph routing/tool loop: `src/indic_research_agent/agent/graph.py`.
+- Main system prompt, prompt version, and non-secret prompt fingerprint:
+  `src/indic_research_agent/agent/prompts.py`.
+- LangGraph prompt injection/routing/tool loop:
+  `src/indic_research_agent/agent/graph.py`.
 - Model factory and provider behavior: `src/indic_research_agent/agent/llm.py`.
 - OpenAI-compatible proxy adapter: `src/indic_research_agent/agent/openai_streaming.py`.
 
@@ -672,6 +699,10 @@ After changing behavior, run at least:
 ```bash
 uv run pytest tests/unit/agent tests/unit/services/test_agent_service_streaming.py -q
 ```
+
+Prompt changes should keep `tests/unit/agent/test_prompts.py` green so the
+Indic-specific prompt is still loaded and cannot be overridden by an incoming
+system message.
 
 ### Changing Chainlit UI behavior
 

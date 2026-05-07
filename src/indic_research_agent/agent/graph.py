@@ -13,7 +13,11 @@ from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from indic_research_agent.agent.prompts import SYSTEM_PROMPT
+from indic_research_agent.agent.prompts import (
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    prompt_fingerprint,
+)
 from indic_research_agent.agent.state import AgentState
 from indic_research_agent.tools.fetch import FetchTool
 from indic_research_agent.tools.schemas import FetchToolInput, SearchToolInput
@@ -28,22 +32,35 @@ def build_agent_graph(
     search_tool: SearchTool,
     fetch_tool: FetchTool,
     max_tool_calls: int = 6,
+    system_prompt: str = SYSTEM_PROMPT,
 ):
     """Build the LangGraph tool-calling loop."""
 
     langchain_tools = _create_langchain_tools(search_tool, fetch_tool)
+    system_prompt_version = (
+        PROMPT_VERSION if system_prompt == SYSTEM_PROMPT else "custom"
+    )
+    system_prompt_hash = prompt_fingerprint(system_prompt)
     bound_model = (
         model.bind_tools(langchain_tools) if hasattr(model, "bind_tools") else model
     )
 
     async def call_model(state: AgentState) -> dict[str, Any]:
-        messages = _with_system_prompt(state.get("messages", []))
+        messages = _with_system_prompt(
+            state.get("messages", []),
+            system_prompt=system_prompt,
+        )
         start = time.perf_counter()
         tool_call_count = state.get("tool_call_count", 0)
         logger.info(
-            "agent.llm.start messages=%s tool_calls=%s",
+            (
+                "agent.llm.start messages=%s tool_calls=%s "
+                "system_prompt_version=%s system_prompt_hash=%s"
+            ),
             len(messages),
             tool_call_count,
+            system_prompt_version,
+            system_prompt_hash,
         )
         _emit_custom(
             {
@@ -214,10 +231,15 @@ async def _ainvoke(model: Any, messages: list[BaseMessage]) -> BaseMessage:
     return await asyncio.to_thread(model.invoke, messages)
 
 
-def _with_system_prompt(messages: list[BaseMessage]) -> list[BaseMessage]:
-    if messages and isinstance(messages[0], SystemMessage):
-        return messages
-    return [SystemMessage(content=SYSTEM_PROMPT), *messages]
+def _with_system_prompt(
+    messages: list[BaseMessage],
+    *,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> list[BaseMessage]:
+    non_system_messages = [
+        message for message in messages if not isinstance(message, SystemMessage)
+    ]
+    return [SystemMessage(content=system_prompt), *non_system_messages]
 
 
 def _tool_calls(message: BaseMessage) -> list[dict[str, Any]]:
