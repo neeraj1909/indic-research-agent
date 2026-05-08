@@ -17,13 +17,25 @@ from query_cli.domain.errors import ProviderSearchError
 from indic_research_agent.config import AppSettings, get_settings
 from indic_research_agent.retrieval import SearchResult
 from indic_research_agent.services.cache_service import CacheService
-from indic_research_agent.services.phoenix_tracing import set_span_output, trace_span
+from indic_research_agent.services.phoenix_tracing import (
+    set_span_attributes,
+    set_span_output,
+    trace_span,
+)
 from indic_research_agent.services.progress_events import emit_agent_progress
 
 ProviderFactory = Callable[..., Sequence[Any]]
 SearchFunction = Callable[..., Awaitable[Sequence[Any]]]
 logger = logging.getLogger(__name__)
-FALLBACK_PROVIDER_IDS = ("arxiv", "semantic-scholar", "openreview", "pubmed", "acl")
+FALLBACK_PROVIDER_IDS = (
+    "semantic-scholar",
+    "semantic-scholar-web",
+    "pubmed",
+    "arxiv-web",
+    "arxiv",
+    "openreview",
+    "acl",
+)
 
 
 class QueryKitService:
@@ -296,8 +308,8 @@ class QueryKitService:
                     since_year=since_year,
                     deadline=deadline,
                 )
-            ): _provider_id(provider)
-            for provider in provider_instances
+            ): (index, _provider_id(provider))
+            for index, provider in enumerate(provider_instances)
         }
         start = time.perf_counter()
         done, pending = await asyncio.wait(
@@ -305,10 +317,10 @@ class QueryKitService:
             timeout=max(0.1, _remaining_seconds(deadline)),
         )
 
-        provider_result_sets: list[Sequence[Any]] = []
+        provider_result_sets_by_index: dict[int, Sequence[Any]] = {}
         failures: list[str] = []
         for task in done:
-            provider_name = tasks[task]
+            provider_index, provider_name = tasks[task]
             try:
                 provider_results = task.result()
             except TimeoutError:
@@ -318,10 +330,10 @@ class QueryKitService:
             except Exception as exc:
                 failures.append(f"{provider_name}: {type(exc).__name__}: {exc}")
             else:
-                provider_result_sets.append(provider_results)
+                provider_result_sets_by_index[provider_index] = provider_results
 
         for task in pending:
-            provider_name = tasks[task]
+            _provider_index, provider_name = tasks[task]
             task.cancel()
             failures.append(f"{provider_name}: timed out")
             logger.warning("query-kit.provider.timeout provider=%s", provider_name)
@@ -331,6 +343,11 @@ class QueryKitService:
                 step_type="retrieval",
             )
 
+        provider_result_sets = [
+            provider_result_sets_by_index[index]
+            for index in range(len(provider_instances))
+            if index in provider_result_sets_by_index
+        ]
         results = _merge_raw_result_sets(provider_result_sets, limit=limit)
         elapsed_ms = (time.perf_counter() - start) * 1000
         logger.info(
@@ -395,7 +412,10 @@ class QueryKitService:
             },
             attributes={
                 "query_kit.provider": provider_name,
+                "query_kit.query": query,
                 "query_kit.limit": limit,
+                "query_kit.since_year": since_year,
+                "query_kit.budget_seconds": remaining,
             },
         ) as provider_span:
             try:
@@ -405,11 +425,25 @@ class QueryKitService:
                         [provider],
                         limit=limit,
                         since_year=since_year,
+                        provider_timeout=remaining,
                     ),
                     timeout=remaining,
                 )
             except TimeoutError:
                 elapsed_ms = (time.perf_counter() - start) * 1000
+                set_span_attributes(
+                    provider_span,
+                    _provider_outcome_attributes(
+                        provider=provider_name,
+                        query=query,
+                        limit=limit,
+                        since_year=since_year,
+                        elapsed_ms=elapsed_ms,
+                        result_count=0,
+                        status="timeout",
+                        failure="timed out",
+                    ),
+                )
                 logger.warning(
                     "query-kit.provider.timeout provider=%s elapsed_ms=%.0f",
                     provider_name,
@@ -423,6 +457,19 @@ class QueryKitService:
                 raise
             except ProviderSearchError as exc:
                 elapsed_ms = (time.perf_counter() - start) * 1000
+                set_span_attributes(
+                    provider_span,
+                    _provider_outcome_attributes(
+                        provider=provider_name,
+                        query=query,
+                        limit=limit,
+                        since_year=since_year,
+                        elapsed_ms=elapsed_ms,
+                        result_count=0,
+                        status="error",
+                        failure=str(exc),
+                    ),
+                )
                 logger.warning(
                     "query-kit.provider.failed provider=%s elapsed_ms=%.0f error=%s",
                     provider_name,
@@ -437,6 +484,19 @@ class QueryKitService:
                 raise
             except Exception as exc:
                 elapsed_ms = (time.perf_counter() - start) * 1000
+                set_span_attributes(
+                    provider_span,
+                    _provider_outcome_attributes(
+                        provider=provider_name,
+                        query=query,
+                        limit=limit,
+                        since_year=since_year,
+                        elapsed_ms=elapsed_ms,
+                        result_count=0,
+                        status="error",
+                        failure=f"{type(exc).__name__}: {exc}",
+                    ),
+                )
                 logger.warning(
                     (
                         "query-kit.provider.failed provider=%s elapsed_ms=%.0f "
@@ -457,6 +517,18 @@ class QueryKitService:
                     f"{type(exc).__name__}: {exc}",
                 ) from exc
             elapsed_ms = (time.perf_counter() - start) * 1000
+            set_span_attributes(
+                provider_span,
+                _provider_outcome_attributes(
+                    provider=provider_name,
+                    query=query,
+                    limit=limit,
+                    since_year=since_year,
+                    elapsed_ms=elapsed_ms,
+                    result_count=len(results),
+                    status="ok",
+                ),
+            )
             set_span_output(
                 provider_span,
                 {
@@ -507,6 +579,62 @@ class QueryKitService:
             snippet=snippet,
             metadata=metadata,
         )
+
+
+def _provider_outcome_attributes(
+    *,
+    provider: str,
+    query: str,
+    limit: int,
+    since_year: int | None,
+    elapsed_ms: float,
+    result_count: int,
+    status: str,
+    failure: str | None = None,
+) -> dict[str, Any]:
+    attrs: dict[str, Any] = {
+        "query_kit.provider": provider,
+        "query_kit.query": query,
+        "query_kit.limit": limit,
+        "query_kit.elapsed_ms": round(elapsed_ms, 3),
+        "query_kit.result_count": result_count,
+        "query_kit.status": status,
+    }
+    if since_year is not None:
+        attrs["query_kit.since_year"] = since_year
+    if failure:
+        attrs["query_kit.failure"] = failure
+        attrs["query_kit.failure_category"] = _failure_category(failure)
+        http_status = _http_status_from_message(failure)
+        if http_status is not None:
+            attrs["query_kit.http_status"] = http_status
+    return attrs
+
+
+def _failure_category(message: str) -> str:
+    lowered = message.casefold()
+    if "429" in lowered or "rate limit" in lowered or "rate limited" in lowered:
+        return "rate_limit"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    if "waf" in lowered or "challenge" in lowered:
+        return "waf_challenge"
+    if "invalid json" in lowered or "parse" in lowered or "malformed" in lowered:
+        return "parse_error"
+    if "http 5" in lowered:
+        return "server_error"
+    if "http 4" in lowered:
+        return "client_error"
+    return "provider_error"
+
+
+def _http_status_from_message(message: str) -> int | None:
+    import re
+
+    match = re.search(r"HTTP\s+(\d{3})", message, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
 
 
 def _stable_result_id(*, title: str, url: str, source: str) -> str:

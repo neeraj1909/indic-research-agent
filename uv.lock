@@ -2653,7 +2653,7 @@ wheels = [
 [[package]]
 name = "query-kit"
 version = "0.1.0"
-source = { git = "https://github.com/neeraj1909/query-kit.git#e33450b9522091a3dcf2dfeff433cf6445dd0a9d" }
+source = { git = "https://github.com/neeraj1909/query-kit.git#d7845dd37cba02647080df44213b329a5b373bc8" }
 dependencies = [
     { name = "defusedxml" },
     { name = "httpx" },

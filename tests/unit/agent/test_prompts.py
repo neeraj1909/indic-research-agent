@@ -43,6 +43,7 @@ def test_system_prompt_is_indic_research_specific_and_tool_grounded() -> None:
         "fetch",
         "source identifiers",
         "BM25",
+        "provider-friendly keyword",
     ]:
         assert marker in prompt
 

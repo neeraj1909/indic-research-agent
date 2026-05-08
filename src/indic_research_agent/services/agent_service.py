@@ -6,6 +6,7 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +30,7 @@ from indic_research_agent.services.phoenix_tracing import (
     force_flush_traces,
     record_span_exception,
     session_attributes,
+    set_span_attributes,
     set_span_output,
     trace_span,
 )
@@ -109,6 +111,7 @@ class AgentService:
 
         history_list = list(history or [])
         should_persist = self._persist_queries if persist is None else persist
+        request_id = f"agent-request:{uuid4().hex[:12]}"
         with trace_span(
             "agent.run",
             kind="AGENT",
@@ -124,6 +127,8 @@ class AgentService:
                     tags=["chainlit", "agent", "bm25-first"],
                 ),
                 "agent.history_turns": len(history_list),
+                "agent.request_id": request_id,
+                "agent.session_id": session_id,
             },
         ) as run_span:
             query_id = None
@@ -145,6 +150,14 @@ class AgentService:
                     text=question,
                     session_id=session_id,
                 )
+                if query_id is not None:
+                    set_span_attributes(
+                        run_span,
+                        {
+                            "agent.query_id": str(query_id),
+                            "query.id": str(query_id),
+                        },
+                    )
 
             input_state: dict[str, Any] = {
                 "messages": _messages_from_history(history_list, question),

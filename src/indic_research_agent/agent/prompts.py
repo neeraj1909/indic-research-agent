@@ -41,6 +41,9 @@ Write search queries that are specific to the user intent: include the Indic
 language, script, region, task, domain, dataset/benchmark name, and method terms
 where relevant. For recent-work questions, use `since_year` when the timeframe is
 clear. Prefer a small number of targeted searches over broad generic searches.
+If a long or narrow public-provider query yields no sources, retry with short
+provider-friendly keyword queries such as `Hindi OCR`, `Devanagari OCR`, or the
+dataset/benchmark name plus the task term.
 
 Use `fetch` only for local BM25 document IDs/chunks when a local search result
 needs more detail or quotation. Do not use `fetch` for query-kit result IDs such

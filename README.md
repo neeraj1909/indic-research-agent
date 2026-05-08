@@ -350,8 +350,9 @@ It reads environment variables and `.env` with `extra="ignore"`.
 | `APP_DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent` | App SQLAlchemy URL. Preferred over `DATABASE_URL` for app tables. |
 | `DATABASE_URL` | none | Accepted as fallback alias for app DB URL. Avoid relying on it for Chainlit; use `CHAINLIT_DATABASE_URL` explicitly. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis cache URL. |
-| `QUERY_KIT_PROVIDERS` | `all` | Comma-separated provider IDs. Supported values include `acl`, `arxiv`, `pubmed`, `semantic-scholar`, `openreview`, and `all`. Provider-level Chainlit/Phoenix spans make slow or failing providers visible. |
-| `QUERY_KIT_TIMEOUT_SECONDS` | `180` | Overall public-provider budget for query-kit search; the UI emits per-provider progress/timeout steps and continues with partial/local BM25 results on timeout. |
+| `QUERY_KIT_PROVIDERS` | `semantic-scholar,semantic-scholar-web,pubmed,arxiv-web` | Comma-separated provider IDs. Supported values include `acl`, `arxiv`, `arxiv-web`, `pubmed`, `semantic-scholar`, `semantic-scholar-web`, `openreview`, and `all`. Default uses the measured fast/partial-safe provider set plus safe public-web fallbacks for Indic OCR queries. |
+| `QUERY_KIT_TIMEOUT_SECONDS` | `30` | Overall public-provider budget for query-kit search; the UI emits per-provider progress/timeout steps and continues with partial/local BM25 results on timeout. |
+| `QUERY_CLI_USER_AGENT` | `indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)` | Project-specific User-Agent passed through query-kit for ordinary HTTP public-web providers such as `arxiv-web` and `semantic-scholar-web`. |
 | `PHOENIX_ENABLED` | `false` in code; Compose/.env example use `true` | Enables OpenTelemetry trace export to Phoenix. |
 | `PHOENIX_COLLECTOR_ENDPOINT` | `http://10.20.30.1:16006` | Phoenix app hostname; OTLP/HTTP traces are sent to `/v1/traces` under this endpoint. |
 | `PHOENIX_PROJECT_NAME` | `indic-research-agent` | Phoenix project name for agent traces. |
@@ -397,8 +398,9 @@ OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 
 # Research providers.
-QUERY_KIT_PROVIDERS=all
-QUERY_KIT_TIMEOUT_SECONDS=180
+QUERY_KIT_PROVIDERS=semantic-scholar,semantic-scholar-web,pubmed,arxiv-web
+QUERY_KIT_TIMEOUT_SECONDS=30
+QUERY_CLI_USER_AGENT=indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)
 
 # Phoenix observability.
 PHOENIX_ENABLED=true
@@ -808,6 +810,54 @@ required, add a supported storage provider and test element persistence before
 raising upload size/type limits.
 
 ## Troubleshooting
+
+### Probe query-kit providers without Docker, Chainlit, or an LLM
+
+Use the app adapter probe before debugging browser/UI issues:
+
+```bash
+QUERY_KIT_PROVIDERS=semantic-scholar,semantic-scholar-web,pubmed,arxiv-web \
+QUERY_KIT_TIMEOUT_SECONDS=30 \
+QUERY_CLI_USER_AGENT='indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)' \
+uv run python scripts/probe_querykit_providers.py --query "Hindi OCR" --limit 3 --since-year 2020
+```
+
+The probe prints normalized app `SearchResult` payloads, provider names, elapsed
+time, and full available snippets/abstracts. It does not call an LLM and does
+not require Docker or Chainlit.
+
+For Phoenix trace debugging, add Phoenix env vars and a stable session id:
+
+```bash
+PHOENIX_ENABLED=true \
+PHOENIX_COLLECTOR_ENDPOINT=http://10.20.30.1:16006 \
+PHOENIX_PROJECT_NAME=indic-research-agent \
+QUERY_KIT_PROVIDERS=semantic-scholar,semantic-scholar-web,pubmed,arxiv-web \
+QUERY_KIT_TIMEOUT_SECONDS=30 \
+QUERY_CLI_USER_AGENT='indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)' \
+uv run python scripts/probe_querykit_providers.py \
+  --query "Hindi OCR" --limit 3 --since-year 2020 --session-id querykit-debug-1
+```
+
+Then inspect the latest provider spans:
+
+```bash
+curl -fsS 'http://10.20.30.1:16006/v1/projects/indic-research-agent/spans?limit=80' \
+  | jq '.data[] | select(.name|startswith("query-kit.provider")) | {name, parent_id, status_code, attributes}'
+```
+
+Expected useful signals:
+
+- one root `probe.query_kit` / `agent.run` trace for a request, with provider
+  spans as children rather than many disconnected traces;
+- provider name, query, `since_year`, limit, elapsed milliseconds, result count,
+  status, failure category, and HTTP status where available;
+- no API keys, cookies, auth headers, or copied browser fingerprint headers in
+  logs/spans.
+
+For local visual Phoenix inspection, use `cdp` against
+`http://10.20.30.1:16006/projects/UHJvamVjdDoz/traces` and keep raw captures
+under `tmp/`.
 
 ### `You didn't provide an API key` or model auth errors
 

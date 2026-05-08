@@ -35,8 +35,10 @@ class AppSettings(BaseSettings):
     litellm_max_tokens: int | None = 1200
     litellm_streaming: bool = True
 
-    query_kit_providers: str = Field(default="all")
-    query_kit_timeout_seconds: float = 180.0
+    query_kit_providers: str = Field(
+        default="semantic-scholar,semantic-scholar-web,pubmed,arxiv-web"
+    )
+    query_kit_timeout_seconds: float = 30.0
 
     phoenix_enabled: bool = False
     phoenix_collector_endpoint: str = "http://10.20.30.1:16006"

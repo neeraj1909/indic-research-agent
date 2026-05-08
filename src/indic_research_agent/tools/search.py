@@ -122,6 +122,36 @@ class SearchTool:
                         limit=input_data.top_k,
                         since_year=input_data.since_year,
                     )
+                    if not research_results:
+                        for fallback_query in _provider_friendly_queries(
+                            input_data.query
+                        ):
+                            emit_agent_progress(
+                                label="Search: public research retry",
+                                detail=(
+                                    "No public-provider results for "
+                                    f"{_quote(input_data.query)}; retrying "
+                                    f"with {_quote(fallback_query)}."
+                                ),
+                                step_type="retrieval",
+                            )
+                            research_results = await self._querykit_service.search(
+                                fallback_query,
+                                providers=input_data.providers,
+                                limit=input_data.top_k,
+                                since_year=input_data.since_year,
+                            )
+                            if research_results:
+                                logger.info(
+                                    (
+                                        "search.query_kit.retry_success "
+                                        "original_query=%r retry_query=%r results=%s"
+                                    ),
+                                    input_data.query,
+                                    fallback_query,
+                                    len(research_results),
+                                )
+                                break
                     set_span_output(
                         research_span,
                         [
@@ -191,6 +221,33 @@ def _search_summary(input_data: SearchToolInput) -> str:
         f"query={_quote(input_data.query)}, top_k={input_data.top_k}, "
         f"source={input_data.source}, providers={providers}{since}"
     )
+
+
+def _provider_friendly_queries(query: str) -> list[str]:
+    lower_query = query.casefold()
+    fallbacks: list[str] = []
+
+    def add(candidate: str) -> None:
+        normalized_candidate = " ".join(candidate.split())
+        if not normalized_candidate:
+            return
+        if normalized_candidate.casefold() == " ".join(query.split()).casefold():
+            return
+        if normalized_candidate not in fallbacks:
+            fallbacks.append(normalized_candidate)
+
+    if "hindi" in lower_query and "ocr" in lower_query:
+        add("Hindi OCR")
+    if "devanagari" in lower_query and "ocr" in lower_query:
+        add("Devanagari OCR")
+    if "indic" in lower_query and "ocr" in lower_query:
+        add("Indic OCR")
+    if "dataset" in lower_query:
+        if "hindi" in lower_query and "ocr" in lower_query:
+            add("Hindi OCR dataset")
+        if "devanagari" in lower_query and "ocr" in lower_query:
+            add("Devanagari OCR dataset")
+    return fallbacks[:3]
 
 
 def _search_result_trace_payload(result: SearchResult) -> dict[str, object]:

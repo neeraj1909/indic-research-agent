@@ -10,7 +10,11 @@ pytestmark = pytest.mark.unit
 
 
 class FakeQueryKitService:
+    def __init__(self) -> None:
+        self.calls = []
+
     async def search(self, query, *, providers=None, limit=5, since_year=None):
+        self.calls.append(query)
         return [
             SearchResult(
                 document_id="query-kit:1",
@@ -22,6 +26,27 @@ class FakeQueryKitService:
                 metadata={"providers": providers, "since_year": since_year},
             )
         ][:limit]
+
+
+class EmptyThenFallbackQueryKitService:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def search(self, query, *, providers=None, limit=5, since_year=None):
+        self.calls.append(query)
+        if query == "Hindi OCR":
+            return [
+                SearchResult(
+                    document_id="query-kit:fallback",
+                    chunk_id="abstract",
+                    score=1.0,
+                    title="Hindi OCR fallback source",
+                    source="https://example.test/hindi-ocr",
+                    snippet="A full public abstract for a Hindi OCR source.",
+                    metadata={"provider": "PubMed"},
+                )
+            ]
+        return []
 
 
 class FailingQueryKitService:
@@ -52,7 +77,8 @@ async def test_search_tool_returns_local_bm25_results() -> None:
 
 @pytest.mark.asyncio
 async def test_search_tool_can_include_querykit_results() -> None:
-    tool = SearchTool(SearchService(), FakeQueryKitService())
+    querykit_service = FakeQueryKitService()
+    tool = SearchTool(SearchService(), querykit_service)
 
     results = await tool.run(
         SearchToolInput(
@@ -65,6 +91,35 @@ async def test_search_tool_can_include_querykit_results() -> None:
 
     assert results[0].document_id == "query-kit:1"
     assert results[0].metadata["providers"] == ["arxiv"]
+    assert querykit_service.calls == ["xai nlp"]
+
+
+@pytest.mark.asyncio
+async def test_search_tool_retries_public_search_with_provider_friendly_query() -> None:
+    querykit_service = EmptyThenFallbackQueryKitService()
+    tool = SearchTool(SearchService(), querykit_service)
+
+    results = await tool.run(
+        SearchToolInput(
+            query=(
+                "Find one recent source on Hindi OCR datasets and answer in two bullets"
+            ),
+            source="research",
+            providers=[
+                "semantic-scholar",
+                "semantic-scholar-web",
+                "pubmed",
+                "arxiv-web",
+            ],
+            since_year=2020,
+        )
+    )
+
+    assert results[0].document_id == "query-kit:fallback"
+    assert querykit_service.calls == [
+        "Find one recent source on Hindi OCR datasets and answer in two bullets",
+        "Hindi OCR",
+    ]
 
 
 @pytest.mark.asyncio

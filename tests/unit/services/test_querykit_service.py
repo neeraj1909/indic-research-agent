@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 from query_cli.domain.errors import ProviderSearchError
@@ -32,8 +33,8 @@ async def test_querykit_service_maps_results_without_network() -> None:
         provider_calls.append((provider_ids, timeout, environ))
         return ["provider"]
 
-    async def search_function(query, providers, *, limit, since_year):
-        search_calls.append((query, providers, limit, since_year))
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        search_calls.append((query, providers, limit, since_year, provider_timeout))
         return [
             FakeQueryKitResult(
                 title="Explainable NLP",
@@ -63,7 +64,9 @@ async def test_querykit_service_maps_results_without_network() -> None:
     assert provider_calls[0][0] == ["arxiv"]
     assert provider_calls[0][1] == pytest.approx(7.0, abs=0.01)
     assert provider_calls[0][2] == {"QUERY_CLI_USER_AGENT": "test"}
-    assert search_calls == [("explainable nlp", ["provider"], 3, 2024)]
+    assert search_calls == [
+        ("explainable nlp", ["provider"], 3, 2024, pytest.approx(7.0, abs=0.01))
+    ]
     assert results[0].document_id.startswith("query-kit:")
     assert results[0].chunk_id == "abstract"
     assert results[0].source == "https://example.test/paper"
@@ -90,17 +93,17 @@ async def test_querykit_service_retries_all_providers_individually() -> None:
         provider_calls.append(provider_ids)
         return provider_ids
 
-    async def search_function(query, providers, *, limit, since_year):
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
         if providers == ["all"]:
             raise ProviderSearchError("all", "combined search failed")
-        if providers == ["acl"]:
-            raise ProviderSearchError("acl", "provider failed")
-        if providers == ["arxiv"]:
+        if providers == ["semantic-scholar"]:
+            raise ProviderSearchError("semantic-scholar", "provider failed")
+        if providers == ["pubmed"]:
             return [
                 FakeQueryKitResult(
                     title="Fallback paper",
                     url="https://example.test/fallback",
-                    source="arxiv",
+                    source="pubmed",
                     abstract="Recovered from a per-provider retry.",
                 )
             ]
@@ -114,7 +117,12 @@ async def test_querykit_service_retries_all_providers_individually() -> None:
 
     results = await service.search("indic hate speech", limit=2)
 
-    assert provider_calls[:2] == [["all"], ["arxiv"]]
+    assert provider_calls[:4] == [
+        ["all"],
+        ["semantic-scholar"],
+        ["semantic-scholar-web"],
+        ["pubmed"],
+    ]
     assert results[0].title == "Fallback paper"
 
 
@@ -123,7 +131,7 @@ async def test_querykit_service_times_out_and_returns_empty_results() -> None:
     def provider_factory(provider_ids, *, timeout, environ):
         return provider_ids
 
-    async def search_function(query, providers, *, limit, since_year):
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
         await asyncio.sleep(1)
         return [
             FakeQueryKitResult(
@@ -140,3 +148,186 @@ async def test_querykit_service_times_out_and_returns_empty_results() -> None:
     )
 
     assert await service.search("indic ocr", limit=1) == []
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_preserves_configured_provider_order() -> None:
+    def provider_factory(provider_ids, *, timeout, environ):
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        provider = providers[0]
+        if provider == "pubmed":
+            await asyncio.sleep(0.02)
+        return [
+            FakeQueryKitResult(
+                title=f"{provider} paper",
+                url=f"https://example.test/{provider}",
+                source=provider,
+                abstract=f"Full abstract from {provider}.",
+            )
+        ]
+
+    service = QueryKitService(
+        AppSettings(
+            query_kit_providers="pubmed,arxiv-web",
+            query_kit_timeout_seconds=1,
+        ),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    results = await service.search("Hindi OCR", limit=2)
+
+    assert [result.metadata["provider"] for result in results] == [
+        "pubmed",
+        "arxiv-web",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_passes_provider_deadline_to_query_kit() -> None:
+    seen_timeouts = []
+
+    def provider_factory(provider_ids, *, timeout, environ):
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        seen_timeouts.append(provider_timeout)
+        return [
+            FakeQueryKitResult(
+                title="Paper",
+                url="https://example.test/paper",
+                source=providers[0],
+                abstract="Grounding text.",
+            )
+        ]
+
+    service = QueryKitService(
+        AppSettings(query_kit_providers="pubmed", query_kit_timeout_seconds=5),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    await service.search("Hindi OCR", limit=1)
+
+    assert seen_timeouts
+    assert seen_timeouts[0] == pytest.approx(5.0, abs=0.1)
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_preserves_full_available_abstract_snippet() -> None:
+    full_abstract = "Indic OCR grounding text. " * 200
+
+    def provider_factory(provider_ids, *, timeout, environ):
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        return [
+            FakeQueryKitResult(
+                title="Full abstract paper",
+                url="https://example.test/full",
+                source="arxiv-web",
+                abstract=full_abstract,
+            )
+        ]
+
+    service = QueryKitService(
+        AppSettings(query_kit_providers="arxiv-web", query_kit_timeout_seconds=5),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    results = await service.search("Devanagari OCR", limit=1)
+
+    assert results[0].snippet == full_abstract
+    assert len(results[0].snippet) > 1000
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_sets_provider_success_span_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def capture_attributes(span, attributes):
+        captured.append(dict(attributes))
+
+    monkeypatch.setattr(
+        "indic_research_agent.services.querykit_service.set_span_attributes",
+        capture_attributes,
+    )
+
+    def provider_factory(provider_ids, *, timeout, environ):
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        return [
+            FakeQueryKitResult(
+                title="Paper",
+                url="https://example.test/paper",
+                source=providers[0],
+                abstract="Grounding text.",
+            )
+        ]
+
+    service = QueryKitService(
+        AppSettings(query_kit_providers="pubmed", query_kit_timeout_seconds=5),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    await service.search("Hindi OCR", limit=1, since_year=2020)
+
+    assert any(
+        attrs.get("query_kit.status") == "ok"
+        and attrs.get("query_kit.provider") == "pubmed"
+        and attrs.get("query_kit.query") == "Hindi OCR"
+        and attrs.get("query_kit.result_count") == 1
+        for attrs in captured
+    )
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_sets_provider_failure_span_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def capture_attributes(span, attributes):
+        captured.append(dict(attributes))
+
+    monkeypatch.setattr(
+        "indic_research_agent.services.querykit_service.set_span_attributes",
+        capture_attributes,
+    )
+
+    def provider_factory(provider_ids, *, timeout, environ):
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        raise ProviderSearchError(
+            "semantic-scholar",
+            "rate limited by upstream provider (HTTP 429)",
+            network_failure=True,
+        )
+
+    service = QueryKitService(
+        AppSettings(
+            query_kit_providers="semantic-scholar",
+            query_kit_timeout_seconds=5,
+        ),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    await service.search("Hindi OCR", limit=1, since_year=2020)
+
+    assert any(
+        attrs.get("query_kit.status") == "error"
+        and attrs.get("query_kit.provider") == "semantic-scholar"
+        and attrs.get("query_kit.failure_category") == "rate_limit"
+        and attrs.get("query_kit.http_status") == 429
+        and attrs.get("query_kit.result_count") == 0
+        for attrs in captured
+    )
