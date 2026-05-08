@@ -25,6 +25,13 @@ from indic_research_agent.services.agent_events import (
     AgentToolStarted,
 )
 from indic_research_agent.services.chat_history import ChatTurn, cap_history
+from indic_research_agent.services.phoenix_tracing import (
+    force_flush_traces,
+    record_span_exception,
+    session_attributes,
+    set_span_output,
+    trace_span,
+)
 from indic_research_agent.services.query_service import QueryService
 from indic_research_agent.services.querykit_service import QueryKitService
 from indic_research_agent.tools.fetch import FetchTool
@@ -100,83 +107,118 @@ class AgentService:
         if not question.strip():
             raise ValueError("question is required")
 
+        history_list = list(history or [])
         should_persist = self._persist_queries if persist is None else persist
-        query_id = None
-        active_tool_args: dict[str, dict[str, Any]] = {}
+        with trace_span(
+            "agent.run",
+            kind="AGENT",
+            input_value={
+                "question": question,
+                "history": _history_to_trace_payload(history_list),
+            },
+            attributes={
+                **session_attributes(
+                    session_id=session_id,
+                    user_identifier=user_identifier,
+                    metadata={"persist_queries": should_persist},
+                    tags=["chainlit", "agent", "bm25-first"],
+                ),
+                "agent.history_turns": len(history_list),
+            },
+        ) as run_span:
+            query_id = None
+            active_tool_args: dict[str, dict[str, Any]] = {}
 
-        yield AgentRunStarted(
-            question=question,
-            session_id=session_id,
-            user_identifier=user_identifier,
-        )
-        yield AgentProgress(
-            label="Request received",
-            detail="Preparing research agent run.",
-            step_type="run",
-        )
-
-        if should_persist:
-            query_id = await self._record_query(
-                text=question,
+            yield AgentRunStarted(
+                question=question,
                 session_id=session_id,
+                user_identifier=user_identifier,
+            )
+            yield AgentProgress(
+                label="Request received",
+                detail="Preparing research agent run.",
+                step_type="run",
             )
 
-        input_state: dict[str, Any] = {
-            "messages": _messages_from_history(history, question),
-            "tool_call_count": 0,
-            "retrieved_context": [],
-            "final_answer": None,
-        }
-        collected_state: dict[str, Any] = {
-            "messages": [],
-            "tool_call_count": 0,
-            "retrieved_context": [],
-            "final_answer": None,
-        }
+            if should_persist:
+                query_id = await self._record_query(
+                    text=question,
+                    session_id=session_id,
+                )
 
-        try:
-            async for raw_chunk in self._stream_graph(input_state, session_id):
-                mode, payload = _split_stream_chunk(raw_chunk)
-                if mode == "custom":
-                    event = _event_from_custom_payload(payload)
-                    if event is None:
-                        continue
-                    if isinstance(event, AgentToolStarted):
-                        key = event.tool_call_id or event.name
-                        active_tool_args[key] = dict(event.arguments)
-                    elif isinstance(event, AgentToolFinished):
-                        key = event.tool_call_id or event.name
-                        if not event.arguments and key in active_tool_args:
-                            event = AgentToolFinished(
-                                name=event.name,
-                                latency_ms=event.latency_ms,
-                                result_summary=event.result_summary,
-                                tool_call_id=event.tool_call_id,
-                                arguments=active_tool_args[key],
-                                result_metadata=event.result_metadata,
-                            )
-                        if should_persist and query_id is not None:
-                            await self._record_tool_call(query_id=query_id, event=event)
-                    yield event
-                elif mode == "messages":
-                    token = _token_from_message_payload(payload)
-                    if token:
-                        yield AgentToken(text=token)
-                elif mode == "updates":
-                    _merge_update_state(collected_state, payload)
+            input_state: dict[str, Any] = {
+                "messages": _messages_from_history(history_list, question),
+                "tool_call_count": 0,
+                "retrieved_context": [],
+                "final_answer": None,
+            }
+            collected_state: dict[str, Any] = {
+                "messages": [],
+                "tool_call_count": 0,
+                "retrieved_context": [],
+                "final_answer": None,
+            }
 
-            answer = _answer_from_state(collected_state)
-            completed = AgentCompleted(
-                answer=answer,
-                retrieved_context=list(collected_state.get("retrieved_context", [])),
-                tool_call_count=int(collected_state.get("tool_call_count", 0)),
-            )
-            if should_persist and query_id is not None:
-                await self._record_response(query_id=query_id, event=completed)
-            yield completed
-        except Exception as exc:
-            logger.exception("agent.stream.failed")
-            yield AgentFailed(message=str(exc))
+            try:
+                async for raw_chunk in self._stream_graph(input_state, session_id):
+                    mode, payload = _split_stream_chunk(raw_chunk)
+                    if mode == "custom":
+                        event = _event_from_custom_payload(payload)
+                        if event is None:
+                            continue
+                        if isinstance(event, AgentToolStarted):
+                            key = event.tool_call_id or event.name
+                            active_tool_args[key] = dict(event.arguments)
+                        elif isinstance(event, AgentToolFinished):
+                            key = event.tool_call_id or event.name
+                            if not event.arguments and key in active_tool_args:
+                                event = AgentToolFinished(
+                                    name=event.name,
+                                    latency_ms=event.latency_ms,
+                                    result_summary=event.result_summary,
+                                    tool_call_id=event.tool_call_id,
+                                    arguments=active_tool_args[key],
+                                    result_metadata=event.result_metadata,
+                                )
+                            if should_persist and query_id is not None:
+                                await self._record_tool_call(
+                                    query_id=query_id,
+                                    event=event,
+                                )
+                        yield event
+                    elif mode == "messages":
+                        token = _token_from_message_payload(payload)
+                        if token:
+                            yield AgentToken(text=token)
+                    elif mode == "updates":
+                        _merge_update_state(collected_state, payload)
+
+                answer = _answer_from_state(collected_state)
+                completed = AgentCompleted(
+                    answer=answer,
+                    retrieved_context=list(
+                        collected_state.get("retrieved_context", [])
+                    ),
+                    tool_call_count=int(collected_state.get("tool_call_count", 0)),
+                )
+                set_span_output(
+                    run_span,
+                    {
+                        "answer": completed.answer,
+                        "retrieved_context_count": len(completed.retrieved_context),
+                        "tool_call_count": completed.tool_call_count,
+                    },
+                )
+                if should_persist and query_id is not None:
+                    await self._record_response(query_id=query_id, event=completed)
+                yield completed
+            except Exception as exc:
+                logger.exception("agent.stream.failed")
+                record_span_exception(run_span, exc)
+                set_span_output(run_span, {"error": str(exc)})
+                yield AgentFailed(message=str(exc))
+            finally:
+                force_flush_traces()
 
     async def _stream_graph(
         self,
@@ -272,6 +314,13 @@ def _messages_from_history(
     return messages
 
 
+def _history_to_trace_payload(history: Sequence[ChatTurn]) -> list[dict[str, str]]:
+    return [
+        {"role": turn.role, "content": turn.content}
+        for turn in cap_history(list(history))
+    ]
+
+
 def _split_stream_chunk(raw_chunk: Any) -> tuple[str, Any]:
     if isinstance(raw_chunk, Mapping):
         chunk_type = raw_chunk.get("type")
@@ -326,6 +375,12 @@ def _event_from_custom_payload(payload: Any) -> AgentStreamEvent | None:
             label="Answer finalized",
             detail=f"{payload.get('answer_chars', 0)} characters ready.",
             step_type="run",
+        )
+    if event_name == "agent.progress":
+        return AgentProgress(
+            label=str(payload.get("label") or "Agent progress"),
+            detail=str(payload.get("detail") or ""),
+            step_type=str(payload.get("step_type") or "run"),  # type: ignore[arg-type]
         )
     return AgentProgress(label=event_name or "Agent progress", detail=str(payload))
 

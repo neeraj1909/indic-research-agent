@@ -350,8 +350,14 @@ It reads environment variables and `.env` with `extra="ignore"`.
 | `APP_DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent` | App SQLAlchemy URL. Preferred over `DATABASE_URL` for app tables. |
 | `DATABASE_URL` | none | Accepted as fallback alias for app DB URL. Avoid relying on it for Chainlit; use `CHAINLIT_DATABASE_URL` explicitly. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis cache URL. |
-| `QUERY_KIT_PROVIDERS` | `all` | Comma-separated provider IDs; known examples in `.env.example`: `acl`, `arxiv`, `pubmed`, `semantic-scholar`, `openreview`, `all`. |
-| `QUERY_KIT_TIMEOUT_SECONDS` | `30` | Timeout passed to query-kit provider factory. |
+| `QUERY_KIT_PROVIDERS` | `all` | Comma-separated provider IDs. Supported values include `acl`, `arxiv`, `pubmed`, `semantic-scholar`, `openreview`, and `all`. Provider-level Chainlit/Phoenix spans make slow or failing providers visible. |
+| `QUERY_KIT_TIMEOUT_SECONDS` | `180` | Overall public-provider budget for query-kit search; the UI emits per-provider progress/timeout steps and continues with partial/local BM25 results on timeout. |
+| `PHOENIX_ENABLED` | `false` in code; Compose/.env example use `true` | Enables OpenTelemetry trace export to Phoenix. |
+| `PHOENIX_COLLECTOR_ENDPOINT` | `http://10.20.30.1:16006` | Phoenix app hostname; OTLP/HTTP traces are sent to `/v1/traces` under this endpoint. |
+| `PHOENIX_PROJECT_NAME` | `indic-research-agent` | Phoenix project name for agent traces. |
+| `PHOENIX_PROTOCOL` | `http/protobuf` | OTLP transport protocol used by the app. |
+| `PHOENIX_BATCH_SPANS` | `true` | Batch spans before export; app force-flushes at end of each agent run. |
+| `PHOENIX_AUTO_INSTRUMENT` | `true` | Activates installed OpenInference LangChain/LiteLLM instrumentors in addition to app manual spans. |
 | `LITELLM_MODEL` | code default `openai/gpt-4o-mini`; `.env.example` uses `chatgpt/gpt-5.5` | Model ID for LiteLLM/LangChain. |
 | `LITELLM_CUSTOM_LLM_PROVIDER` | none | Optional LiteLLM custom provider name. |
 | `LITELLM_API_KEY` | none | Optional API key passed to LiteLLM or the OpenAI-compatible adapter. |
@@ -392,7 +398,15 @@ ANTHROPIC_API_KEY=
 
 # Research providers.
 QUERY_KIT_PROVIDERS=all
-QUERY_KIT_TIMEOUT_SECONDS=30
+QUERY_KIT_TIMEOUT_SECONDS=180
+
+# Phoenix observability.
+PHOENIX_ENABLED=true
+PHOENIX_COLLECTOR_ENDPOINT=http://10.20.30.1:16006
+PHOENIX_PROJECT_NAME=indic-research-agent
+PHOENIX_PROTOCOL=http/protobuf
+PHOENIX_BATCH_SPANS=true
+PHOENIX_AUTO_INSTRUMENT=true
 
 # Local services.
 APP_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent

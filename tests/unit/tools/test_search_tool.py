@@ -24,6 +24,11 @@ class FakeQueryKitService:
         ][:limit]
 
 
+class FailingQueryKitService:
+    async def search(self, query, *, providers=None, limit=5, since_year=None):
+        raise TimeoutError("public providers timed out")
+
+
 @pytest.mark.asyncio
 async def test_search_tool_returns_local_bm25_results() -> None:
     tool = SearchTool(
@@ -60,3 +65,24 @@ async def test_search_tool_can_include_querykit_results() -> None:
 
     assert results[0].document_id == "query-kit:1"
     assert results[0].metadata["providers"] == ["arxiv"]
+
+
+@pytest.mark.asyncio
+async def test_search_tool_continues_with_local_results_when_querykit_fails() -> None:
+    tool = SearchTool(
+        SearchService(
+            [
+                DocumentChunk(
+                    document_id="bm25",
+                    chunk_id="bm25-1",
+                    text="Hindi OCR benchmark dataset for Devanagari documents",
+                    title="Hindi OCR",
+                )
+            ]
+        ),
+        FailingQueryKitService(),
+    )
+
+    results = await tool.run(SearchToolInput(query="Hindi OCR", source="all"))
+
+    assert [result.document_id for result in results] == ["bm25"]

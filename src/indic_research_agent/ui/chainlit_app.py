@@ -17,9 +17,11 @@ from indic_research_agent.services.chat_history import (
     history_to_json,
     normalize_history,
 )
+from indic_research_agent.services.phoenix_tracing import configure_phoenix
 from indic_research_agent.ui.chainlit_stream_renderer import ChainlitStreamRenderer
 
 logger = logging.getLogger(__name__)
+configure_phoenix()
 
 _HISTORY_KEY = "message_history"
 _APP_SESSION_KEY = "app_session_id"

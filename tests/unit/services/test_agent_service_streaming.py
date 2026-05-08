@@ -43,6 +43,15 @@ class FakeStreamingGraph:
                 "result_metadata": {"result_count": 1},
             },
         )
+        yield (
+            "custom",
+            {
+                "event": "agent.progress",
+                "label": "Query-kit providers running",
+                "detail": "providers=arxiv; budget=20s",
+                "step_type": "retrieval",
+            },
+        )
         yield ("messages", (AIMessage(content="BM25 "), {}))
         yield ("messages", (AIMessage(content="works."), {}))
         yield (
@@ -76,6 +85,12 @@ async def test_stream_answer_emits_ordered_progress_tokens_and_completion() -> N
     assert isinstance(events[0], AgentRunStarted)
     assert isinstance(events[1], AgentProgress)
     assert any(isinstance(event, AgentToolStarted) for event in events)
+    assert any(
+        isinstance(event, AgentProgress)
+        and event.label == "Query-kit providers running"
+        and event.step_type == "retrieval"
+        for event in events
+    )
     finished = next(event for event in events if isinstance(event, AgentToolFinished))
     assert finished.arguments == {"query": "bm25"}
     assert [

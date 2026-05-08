@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.13",
+    "arize-phoenix==12.31.2",
+    "arize-phoenix-otel>=0.16.1",
     "asyncpg>=0.29",
     "bm25s>=0.2.0",
     "chainlit>=2.0",
@@ -15,6 +17,8 @@ dependencies = [
     "langchain-litellm>=0.6.4",
     "langgraph>=0.2",
     "litellm>=1.60",
+    "openinference-instrumentation-langchain>=0.1.63",
+    "openinference-instrumentation-litellm>=0.1.30",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "query-kit @ git+https://github.com/neeraj1909/query-kit.git",

@@ -36,7 +36,14 @@ class AppSettings(BaseSettings):
     litellm_streaming: bool = True
 
     query_kit_providers: str = Field(default="all")
-    query_kit_timeout_seconds: float = 30.0
+    query_kit_timeout_seconds: float = 180.0
+
+    phoenix_enabled: bool = False
+    phoenix_collector_endpoint: str = "http://10.20.30.1:16006"
+    phoenix_project_name: str = "indic-research-agent"
+    phoenix_protocol: str = "http/protobuf"
+    phoenix_batch_spans: bool = True
+    phoenix_auto_instrument: bool = True
 
     database_url: str = Field(
         default=(

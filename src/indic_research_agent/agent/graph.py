@@ -19,6 +19,12 @@ from indic_research_agent.agent.prompts import (
     prompt_fingerprint,
 )
 from indic_research_agent.agent.state import AgentState
+from indic_research_agent.services.phoenix_tracing import (
+    llm_attributes,
+    set_span_output,
+    tool_attributes,
+    trace_span,
+)
 from indic_research_agent.tools.fetch import FetchTool
 from indic_research_agent.tools.schemas import FetchToolInput, SearchToolInput
 from indic_research_agent.tools.search import SearchTool
@@ -70,7 +76,26 @@ def build_agent_graph(
                 "label": "Final synthesis" if tool_call_count else "LLM call",
             }
         )
-        response = await _ainvoke(bound_model, messages)
+        with trace_span(
+            "agent.llm",
+            kind="LLM",
+            input_value=_messages_to_trace_payload(messages),
+            attributes={
+                **llm_attributes(
+                    model_name=_model_name(bound_model),
+                    invocation_parameters={
+                        "streaming": getattr(bound_model, "streaming", None),
+                        "temperature": getattr(bound_model, "temperature", None),
+                        "max_tokens": getattr(bound_model, "max_tokens", None),
+                    },
+                ),
+                "agent.system_prompt_version": system_prompt_version,
+                "agent.system_prompt_hash": system_prompt_hash,
+                "agent.tool_call_count": tool_call_count,
+            },
+        ) as llm_span:
+            response = await _ainvoke(bound_model, messages)
+            set_span_output(llm_span, _message_to_trace_payload(response))
         elapsed = time.perf_counter() - start
         requested_tool_calls = len(_tool_calls(response))
         logger.info(
@@ -115,14 +140,29 @@ def build_agent_graph(
                     "args_summary": _summarize_mapping(tool_args),
                 }
             )
-            if tool_name == "search":
-                result = await search_tool.run(
-                    SearchToolInput.model_validate(tool_args)
+            with trace_span(
+                f"tool.{tool_name}",
+                kind="RETRIEVER" if tool_name in {"search", "fetch"} else "TOOL",
+                input_value=tool_args,
+                attributes=tool_attributes(name=tool_name, parameters=tool_args),
+            ) as tool_span:
+                if tool_name == "search":
+                    result = await search_tool.run(
+                        SearchToolInput.model_validate(tool_args)
+                    )
+                elif tool_name == "fetch":
+                    result = await fetch_tool.run(
+                        FetchToolInput.model_validate(tool_args)
+                    )
+                else:
+                    raise ValueError(f"unknown tool: {tool_name}")
+                set_span_output(
+                    tool_span,
+                    {
+                        "summary": _summarize_tool_result(result),
+                        "metadata": _tool_result_metadata(result),
+                    },
                 )
-            elif tool_name == "fetch":
-                result = await fetch_tool.run(FetchToolInput.model_validate(tool_args))
-            else:
-                raise ValueError(f"unknown tool: {tool_name}")
             elapsed = time.perf_counter() - start
             logger.info(
                 "agent.tool.end name=%s elapsed_seconds=%.2f",
@@ -253,6 +293,32 @@ def _message_content(message: BaseMessage) -> str:
     if isinstance(content, str):
         return content
     return json.dumps(content)
+
+
+def _messages_to_trace_payload(messages: list[BaseMessage]) -> list[dict[str, Any]]:
+    return [_message_to_trace_payload(message) for message in messages]
+
+
+def _message_to_trace_payload(message: BaseMessage) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "role": getattr(message, "type", message.__class__.__name__),
+        "content": _message_content(message),
+    }
+    tool_calls = _tool_calls(message)
+    if tool_calls:
+        payload["tool_calls"] = tool_calls
+    if isinstance(message, ToolMessage):
+        payload["tool_call_id"] = message.tool_call_id
+        payload["name"] = message.name
+    return payload
+
+
+def _model_name(model: Any) -> str:
+    for attr in ("model", "model_name", "model_id"):
+        value = getattr(model, attr, None)
+        if value:
+            return str(value)
+    return model.__class__.__name__
 
 
 def _dump_tool_payload(result: Any) -> str:

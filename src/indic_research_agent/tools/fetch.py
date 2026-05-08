@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from indic_research_agent.retrieval import SearchService
 from indic_research_agent.services.cache_service import CacheService
+from indic_research_agent.services.phoenix_tracing import set_span_output, trace_span
 from indic_research_agent.tools.schemas import FetchResult, FetchToolInput
 
 
@@ -27,11 +28,27 @@ class FetchTool:
             if cached is not None:
                 return FetchResult.model_validate(cached)
 
-        chunk = self._search_service.fetch(
-            input_data.document_id,
-            chunk_id=input_data.chunk_id,
-        )
-        content = chunk.text[: input_data.max_chars]
+        with trace_span(
+            "fetch.local_bm25_chunk",
+            kind="RETRIEVER",
+            input_value=cache_payload,
+            attributes={"retrieval.source": "local"},
+        ) as fetch_span:
+            chunk = self._search_service.fetch(
+                input_data.document_id,
+                chunk_id=input_data.chunk_id,
+            )
+            content = chunk.text[: input_data.max_chars]
+            set_span_output(
+                fetch_span,
+                {
+                    "document_id": chunk.document_id,
+                    "chunk_id": chunk.chunk_id,
+                    "title": chunk.title,
+                    "source": chunk.source,
+                    "content_chars": len(content),
+                },
+            )
         result = FetchResult(
             document_id=chunk.document_id,
             chunk_id=chunk.chunk_id,

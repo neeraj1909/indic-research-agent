@@ -17,6 +17,7 @@ Chainlit UI
   -> SearchTool / FetchTool
   -> SearchService / QueryKitService
   -> BM25 index / query-kit providers
+  -> Phoenix/OpenTelemetry traces for agent, LLM, tool, BM25, and query-kit spans
 ```
 
 ## Module Map
@@ -26,7 +27,7 @@ Chainlit UI
 | `src/indic_research_agent/config.py` | Environment-backed settings. |
 | `src/indic_research_agent/ui/` | Chainlit adapter only. |
 | `src/indic_research_agent/controllers/` | UI-facing workflow controllers. |
-| `src/indic_research_agent/services/` | Application orchestration and external service adapters. |
+| `src/indic_research_agent/services/` | Application orchestration, Phoenix tracing, and external service adapters. |
 | `src/indic_research_agent/agent/` | LangGraph state, prompts, model factory, graph construction. |
 | `src/indic_research_agent/tools/` | Typed Search and Fetch tool implementations. |
 | `src/indic_research_agent/retrieval/` | BM25 tokenizer, index, search contracts, and seed corpus. |
@@ -55,7 +56,7 @@ prevents common vector and embedding packages from being added directly.
 ## Current Limits
 
 - Phase 1 uses an in-memory seed corpus.
-- Query-kit public provider calls are wrapped but not cached until Phase 3.
+- Query-kit public provider calls have an overall timeout budget and UI/Phoenix progress events; provider-specific retries are best-effort.
 - Fetch currently supports local chunks by `document_id` and `chunk_id`.
 - Live LiteLLM calls require provider environment variables.
 - Chainlit SQLAlchemy persistence stores text messages, steps, and thread

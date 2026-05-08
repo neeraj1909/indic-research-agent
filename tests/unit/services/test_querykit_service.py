@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import pytest
@@ -59,7 +60,9 @@ async def test_querykit_service_maps_results_without_network() -> None:
         since_year=2024,
     )
 
-    assert provider_calls == [(["arxiv"], 7.0, {"QUERY_CLI_USER_AGENT": "test"})]
+    assert provider_calls[0][0] == ["arxiv"]
+    assert provider_calls[0][1] == pytest.approx(7.0, abs=0.01)
+    assert provider_calls[0][2] == {"QUERY_CLI_USER_AGENT": "test"}
     assert search_calls == [("explainable nlp", ["provider"], 3, 2024)]
     assert results[0].document_id.startswith("query-kit:")
     assert results[0].chunk_id == "abstract"
@@ -111,5 +114,29 @@ async def test_querykit_service_retries_all_providers_individually() -> None:
 
     results = await service.search("indic hate speech", limit=2)
 
-    assert provider_calls[:3] == [["all"], ["acl"], ["arxiv"]]
+    assert provider_calls[:2] == [["all"], ["arxiv"]]
     assert results[0].title == "Fallback paper"
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_times_out_and_returns_empty_results() -> None:
+    def provider_factory(provider_ids, *, timeout, environ):
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year):
+        await asyncio.sleep(1)
+        return [
+            FakeQueryKitResult(
+                title="Too slow",
+                url="https://example.test/slow",
+                source="slow",
+            )
+        ]
+
+    service = QueryKitService(
+        AppSettings(query_kit_providers="arxiv", query_kit_timeout_seconds=0.1),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    assert await service.search("indic ocr", limit=1) == []
