@@ -44,11 +44,16 @@ def test_system_prompt_is_indic_research_specific_and_tool_grounded() -> None:
         "source identifiers",
         "BM25",
         "provider-friendly keyword",
+        "citation_id",
+        "inline citation",
+        "Sources",
+        "No retrieved sources",
     ]:
         assert marker in prompt
 
     assert "do not use embeddings" in prompt.lower()
     assert "uncertainty" in prompt.lower()
+    assert "every factual bullet" in prompt.lower()
 
 
 def test_incoming_system_message_cannot_override_project_prompt() -> None:

@@ -21,6 +21,7 @@ from indic_research_agent.agent.prompts import (
 from indic_research_agent.agent.state import AgentState
 from indic_research_agent.services.phoenix_tracing import (
     llm_attributes,
+    set_span_attributes,
     set_span_output,
     tool_attributes,
     trace_span,
@@ -156,11 +157,14 @@ def build_agent_graph(
                     )
                 else:
                     raise ValueError(f"unknown tool: {tool_name}")
+                tool_result_metadata = _tool_result_metadata(result)
+                set_span_attributes(tool_span, _tool_result_attributes(result))
                 set_span_output(
                     tool_span,
                     {
                         "summary": _summarize_tool_result(result),
-                        "metadata": _tool_result_metadata(result),
+                        "metadata": tool_result_metadata,
+                        "results": _tool_result_trace_payload(result),
                     },
                 )
             elapsed = time.perf_counter() - start
@@ -364,9 +368,14 @@ def _tool_result_metadata(result: Any) -> dict[str, Any]:
         return {
             "result_count": len(result),
             "document_ids": [str(getattr(item, "document_id", "")) for item in result],
+            "citation_ids": [
+                str(getattr(item, "citation_id", ""))
+                for item in result
+                if getattr(item, "citation_id", None)
+            ],
         }
     metadata: dict[str, Any] = {}
-    for key in ("document_id", "chunk_id"):
+    for key in ("document_id", "chunk_id", "citation_id"):
         value = getattr(result, key, None)
         if value is not None:
             metadata[key] = str(value)
@@ -374,3 +383,29 @@ def _tool_result_metadata(result: Any) -> dict[str, Any]:
     if isinstance(content, str):
         metadata["content_chars"] = len(content)
     return metadata
+
+
+def _tool_result_attributes(result: Any) -> dict[str, Any]:
+    metadata = _tool_result_metadata(result)
+    attrs: dict[str, Any] = {}
+    if "result_count" in metadata:
+        attrs["tool.result_count"] = metadata["result_count"]
+    if "document_ids" in metadata:
+        attrs["tool.document_ids"] = metadata["document_ids"]
+    if "citation_ids" in metadata:
+        attrs["tool.citation_ids"] = metadata["citation_ids"]
+    if "document_id" in metadata:
+        attrs["tool.document_id"] = metadata["document_id"]
+    if "chunk_id" in metadata:
+        attrs["tool.chunk_id"] = metadata["chunk_id"]
+    if "content_chars" in metadata:
+        attrs["tool.content_chars"] = metadata["content_chars"]
+    return attrs
+
+
+def _tool_result_trace_payload(result: Any) -> Any:
+    if isinstance(result, list):
+        return [item.model_dump(mode="json") for item in result]
+    if hasattr(result, "model_dump"):
+        return result.model_dump(mode="json")
+    return result

@@ -46,7 +46,9 @@ class FetchTool:
                     "chunk_id": chunk.chunk_id,
                     "title": chunk.title,
                     "source": chunk.source,
+                    "content": content,
                     "content_chars": len(content),
+                    "metadata": dict(chunk.metadata),
                 },
             )
         result = FetchResult(

@@ -22,6 +22,7 @@ class ToolSearchResult(BaseModel):
     title: str | None = None
     source: str | None = None
     snippet: str
+    citation_id: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
 
 

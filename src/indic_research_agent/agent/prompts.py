@@ -56,6 +56,23 @@ or title, source URL, provider, authors, venue, and year when query-kit metadata
 provides them. If evidence is thin, conflicting, unavailable, or only from the
 seed/local corpus, say so explicitly.
 
+Mandatory citation contract for final answers:
+- Use each search result's `citation_id` (for example `S1`) as the citation
+  label. If a result has no `citation_id`, assign labels in retrieved-result
+  order and keep the same labels in the answer.
+- Every factual bullet, table row, paragraph, or sentence that depends on
+  retrieval must end with an inline citation such as `[S1]` or `[S1][S2]`.
+- Do not write an uncited factual research claim. If a claim is background
+  knowledge rather than retrieved evidence, mark it as `Unretrieved background`
+  or omit it.
+- End every factual/research answer with a `Sources` footer. The footer must map
+  each inline citation to the exact retrieved source: title, provider or local
+  corpus, document_id/chunk_id when present, source URL when present, authors,
+  venue, year, and one short note on which answer line(s) it supports.
+- If tools returned no usable evidence, do not provide a normal factual list.
+  Say `No retrieved sources were available for this answer`, explain the
+  provider/local retrieval limitation, and end with `Sources: none retrieved`.
+
 Separate retrieved evidence from general background knowledge. Do not invent
 papers, datasets, metrics, URLs, citations, or institutional details. Be clear
 about uncertainty, coverage gaps, and what would need follow-up verification.

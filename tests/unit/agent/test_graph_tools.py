@@ -85,7 +85,19 @@ class FakeQueryKitService:
 
 
 @pytest.mark.asyncio
-async def test_graph_executes_search_then_fetch_then_final_answer() -> None:
+async def test_graph_executes_search_then_fetch_then_final_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    span_outputs: list[object] = []
+
+    def capture_span_output(span, value):
+        span_outputs.append(value)
+
+    monkeypatch.setattr(
+        "indic_research_agent.agent.graph.set_span_output",
+        capture_span_output,
+    )
+
     search_service = SearchService(
         [
             DocumentChunk(
@@ -127,3 +139,15 @@ async def test_graph_executes_search_then_fetch_then_final_answer() -> None:
         "query-kit:research-1",
     }
     assert fetch_payload["content"].startswith("BM25 keyword retrieval")
+    search_span_output = next(
+        output
+        for output in span_outputs
+        if isinstance(output, dict)
+        and output.get("summary", "").startswith("2 result(s)")
+    )
+    assert search_span_output["metadata"]["result_count"] == 2
+    assert len(search_span_output["results"]) == 2
+    assert search_span_output["results"][0]["snippet"].startswith(
+        "BM25 keyword retrieval"
+    )
+    assert search_span_output["results"][0]["citation_id"] == "S1"

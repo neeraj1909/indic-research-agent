@@ -218,6 +218,7 @@ class AgentService:
                     run_span,
                     {
                         "answer": completed.answer,
+                        "retrieved_context": completed.retrieved_context,
                         "retrieved_context_count": len(completed.retrieved_context),
                         "tool_call_count": completed.tool_call_count,
                     },

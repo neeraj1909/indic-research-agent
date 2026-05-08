@@ -90,6 +90,8 @@ async def test_search_tool_can_include_querykit_results() -> None:
     )
 
     assert results[0].document_id == "query-kit:1"
+    assert results[0].citation_id == "S1"
+    assert results[0].metadata["citation_id"] == "S1"
     assert results[0].metadata["providers"] == ["arxiv"]
     assert querykit_service.calls == ["xai nlp"]
 

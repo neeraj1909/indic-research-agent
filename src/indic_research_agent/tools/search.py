@@ -184,7 +184,8 @@ class SearchTool:
                 step_type="retrieval",
             )
         tool_results = [
-            _to_tool_result(result) for result in results[: input_data.top_k]
+            _to_tool_result(result, citation_id=f"S{index}")
+            for index, result in enumerate(results[: input_data.top_k], start=1)
         ]
         logger.info("search.tool.end results=%s %s", len(tool_results), search_summary)
         emit_agent_progress(
@@ -202,7 +203,9 @@ class SearchTool:
         return tool_results
 
 
-def _to_tool_result(result: SearchResult) -> ToolSearchResult:
+def _to_tool_result(result: SearchResult, *, citation_id: str) -> ToolSearchResult:
+    metadata = dict(result.metadata)
+    metadata["citation_id"] = citation_id
     return ToolSearchResult(
         document_id=result.document_id,
         chunk_id=result.chunk_id,
@@ -210,7 +213,8 @@ def _to_tool_result(result: SearchResult) -> ToolSearchResult:
         title=result.title,
         source=result.source,
         snippet=result.snippet,
-        metadata=dict(result.metadata),
+        citation_id=citation_id,
+        metadata=metadata,
     )
 
 
@@ -258,6 +262,7 @@ def _search_result_trace_payload(result: SearchResult) -> dict[str, object]:
         "source": result.source,
         "score": result.score,
         "snippet": result.snippet,
+        "citation_id": getattr(result, "citation_id", None),
         "metadata": dict(result.metadata),
     }
 
