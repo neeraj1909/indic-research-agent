@@ -36,6 +36,16 @@ FALLBACK_PROVIDER_IDS = (
     "openreview",
     "acl",
 )
+KNOWN_PROVIDER_IDS = frozenset((*FALLBACK_PROVIDER_IDS, "all"))
+PROVIDER_ALIASES = {
+    "semanticscholar": "semantic-scholar",
+    "semantic_scholar": "semantic-scholar",
+    "semantic scholar": "semantic-scholar",
+    "s2": "semantic-scholar",
+    "arxiv": "arxiv-web",
+    "arxiv-web": "arxiv-web",
+    "arxiv_web": "arxiv-web",
+}
 
 
 class QueryKitService:
@@ -66,7 +76,27 @@ class QueryKitService:
         limit: int = 5,
         since_year: int | None = None,
     ) -> list[SearchResult]:
-        provider_ids = list(providers or self._settings.query_kit_provider_ids)
+        requested_provider_ids = list(
+            providers or self._settings.query_kit_provider_ids
+        )
+        provider_ids = _normalize_provider_ids(
+            requested_provider_ids,
+            default_provider_ids=self._settings.query_kit_provider_ids,
+        )
+        if provider_ids != requested_provider_ids:
+            logger.info(
+                "query-kit.providers.normalized requested=%s resolved=%s",
+                requested_provider_ids,
+                provider_ids,
+            )
+            emit_agent_progress(
+                label="Query-kit providers normalized",
+                detail=(
+                    f"requested={','.join(requested_provider_ids)}; "
+                    f"using={','.join(provider_ids)}"
+                ),
+                step_type="retrieval",
+            )
         if limit <= 0:
             raise ValueError("limit must be greater than 0")
         if not query.strip():
@@ -690,6 +720,34 @@ def _raw_result_trace_payload(result: Any) -> dict[str, Any]:
         "venue": getattr(result, "venue", None),
         "abstract": getattr(result, "abstract", None),
     }
+
+
+def _normalize_provider_ids(
+    provider_ids: Sequence[str],
+    *,
+    default_provider_ids: Sequence[str],
+) -> list[str]:
+    resolved: list[str] = []
+    for provider_id in provider_ids:
+        normalized = " ".join(str(provider_id).strip().casefold().split())
+        normalized = PROVIDER_ALIASES.get(normalized, normalized.replace("_", "-"))
+        if normalized == "all":
+            return ["all"]
+        if normalized not in KNOWN_PROVIDER_IDS:
+            logger.warning(
+                "query-kit.provider.ignored_unknown provider=%s", provider_id
+            )
+            continue
+        if normalized not in resolved:
+            resolved.append(normalized)
+    if resolved:
+        return resolved
+    if list(provider_ids) == list(default_provider_ids):
+        return ["all"]
+    return _normalize_provider_ids(
+        default_provider_ids,
+        default_provider_ids=default_provider_ids,
+    )
 
 
 def _fallback_provider_ids(provider_ids: Sequence[str]) -> list[str]:

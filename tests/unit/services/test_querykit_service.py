@@ -61,7 +61,7 @@ async def test_querykit_service_maps_results_without_network() -> None:
         since_year=2024,
     )
 
-    assert provider_calls[0][0] == ["arxiv"]
+    assert provider_calls[0][0] == ["arxiv-web"]
     assert provider_calls[0][1] == pytest.approx(7.0, abs=0.01)
     assert provider_calls[0][2] == {"QUERY_CLI_USER_AGENT": "test"}
     assert search_calls == [
@@ -183,6 +183,42 @@ async def test_querykit_service_preserves_configured_provider_order() -> None:
         "pubmed",
         "arxiv-web",
     ]
+
+
+@pytest.mark.asyncio
+async def test_querykit_service_normalizes_llm_supplied_provider_aliases() -> None:
+    provider_calls = []
+
+    def provider_factory(provider_ids, *, timeout, environ):
+        provider_calls.append(provider_ids)
+        return provider_ids
+
+    async def search_function(query, providers, *, limit, since_year, provider_timeout):
+        return [
+            FakeQueryKitResult(
+                title=f"{providers[0]} paper",
+                url=f"https://example.test/{providers[0]}",
+                source=providers[0],
+                abstract="Grounding text.",
+            )
+        ]
+
+    service = QueryKitService(
+        AppSettings(
+            query_kit_providers="semantic-scholar,pubmed,arxiv-web",
+            query_kit_timeout_seconds=5,
+        ),
+        provider_factory=provider_factory,
+        search_function=search_function,
+    )
+
+    await service.search(
+        "Indian language hate speech detection",
+        providers=["semanticscholar", "crossref", "arxiv"],
+        limit=2,
+    )
+
+    assert provider_calls[0] == ["semantic-scholar", "arxiv-web"]
 
 
 @pytest.mark.asyncio
