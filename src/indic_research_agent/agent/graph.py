@@ -8,7 +8,13 @@ import logging
 import time
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -53,19 +59,24 @@ def build_agent_graph(
     )
 
     async def call_model(state: AgentState) -> dict[str, Any]:
+        tool_call_count = state.get("tool_call_count", 0)
+        tool_budget_exhausted = tool_call_count >= max_tool_calls
         messages = _with_system_prompt(
             state.get("messages", []),
             system_prompt=system_prompt,
         )
+        if tool_budget_exhausted:
+            messages = _with_final_synthesis_instruction(messages)
+        active_model = model if tool_budget_exhausted else bound_model
         start = time.perf_counter()
-        tool_call_count = state.get("tool_call_count", 0)
         logger.info(
             (
-                "agent.llm.start messages=%s tool_calls=%s "
+                "agent.llm.start messages=%s tool_calls=%s tools_enabled=%s "
                 "system_prompt_version=%s system_prompt_hash=%s"
             ),
             len(messages),
             tool_call_count,
+            not tool_budget_exhausted,
             system_prompt_version,
             system_prompt_hash,
         )
@@ -74,7 +85,9 @@ def build_agent_graph(
                 "event": "agent.llm.start",
                 "messages": len(messages),
                 "tool_call_count": tool_call_count,
-                "label": "Final synthesis" if tool_call_count else "LLM call",
+                "label": "Final synthesis"
+                if tool_budget_exhausted or tool_call_count
+                else "LLM call",
             }
         )
         with trace_span(
@@ -83,19 +96,26 @@ def build_agent_graph(
             input_value=_messages_to_trace_payload(messages),
             attributes={
                 **llm_attributes(
-                    model_name=_model_name(bound_model),
+                    model_name=_model_name(active_model),
                     invocation_parameters={
-                        "streaming": getattr(bound_model, "streaming", None),
-                        "temperature": getattr(bound_model, "temperature", None),
-                        "max_tokens": getattr(bound_model, "max_tokens", None),
+                        "streaming": getattr(active_model, "streaming", None),
+                        "temperature": getattr(active_model, "temperature", None),
+                        "max_tokens": getattr(active_model, "max_tokens", None),
                     },
                 ),
                 "agent.system_prompt_version": system_prompt_version,
                 "agent.system_prompt_hash": system_prompt_hash,
                 "agent.tool_call_count": tool_call_count,
+                "agent.tools_enabled": not tool_budget_exhausted,
+                "agent.tool_budget_exhausted": tool_budget_exhausted,
             },
         ) as llm_span:
-            response = await _ainvoke(bound_model, messages)
+            response = await _ainvoke(active_model, messages)
+            if tool_budget_exhausted and _tool_calls(response):
+                response = AIMessage(
+                    content=_message_content(response).strip()
+                    or _fallback_answer(state.get("retrieved_context", []))
+                )
             set_span_output(llm_span, _message_to_trace_payload(response))
         elapsed = time.perf_counter() - start
         requested_tool_calls = len(_tool_calls(response))
@@ -113,7 +133,11 @@ def build_agent_graph(
         )
         update: dict[str, Any] = {"messages": [response]}
         if not _tool_calls(response):
-            final_answer = _message_content(response)
+            final_answer = _message_content(response).strip()
+            if not final_answer:
+                final_answer = _fallback_answer(state.get("retrieved_context", []))
+                response = AIMessage(content=final_answer)
+                update["messages"] = [response]
             update["final_answer"] = final_answer
             _emit_custom(
                 {
@@ -284,6 +308,53 @@ def _with_system_prompt(
         message for message in messages if not isinstance(message, SystemMessage)
     ]
     return [SystemMessage(content=system_prompt), *non_system_messages]
+
+
+def _with_final_synthesis_instruction(messages: list[BaseMessage]) -> list[BaseMessage]:
+    return [
+        *messages,
+        HumanMessage(
+            content=(
+                "The tool-call budget is exhausted. Do not call any tools. "
+                "Write the best possible final answer now using only the retrieved "
+                "tool results already present in this conversation. If the tool "
+                "results are empty or all providers failed, still answer with a "
+                "clear limitation message: `No retrieved sources were available "
+                "for this answer`, briefly explain that retrieval returned no "
+                "usable evidence, and finish with `Sources: none retrieved`."
+            )
+        ),
+    ]
+
+
+def _fallback_answer(retrieved_context: list[str] | None) -> str:
+    if _has_any_retrieved_items(retrieved_context or []):
+        return (
+            "I retrieved evidence, but the final synthesis model returned an empty "
+            "answer. Please retry the question; the retrieved sources are available "
+            "in the request trace for debugging."
+        )
+    return (
+        "No retrieved sources were available for this answer. The search tools "
+        "returned no usable evidence before the response was finalized. Try a "
+        "shorter provider-friendly query or check public-provider availability.\n\n"
+        "Sources: none retrieved"
+    )
+
+
+def _has_any_retrieved_items(retrieved_context: list[str]) -> bool:
+    for payload in retrieved_context:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            if payload.strip() and payload.strip() != "[]":
+                return True
+            continue
+        if isinstance(parsed, list) and parsed:
+            return True
+        if isinstance(parsed, dict) and parsed:
+            return True
+    return False
 
 
 def _tool_calls(message: BaseMessage) -> list[dict[str, Any]]:

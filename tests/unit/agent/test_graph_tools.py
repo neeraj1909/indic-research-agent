@@ -58,6 +58,47 @@ class FakeToolCallingModel:
         return AIMessage(content="BM25 retrieval works with fetched evidence.")
 
 
+class BudgetExhaustionModel:
+    def __init__(self) -> None:
+        self.bound_calls = 0
+        self.unbound_calls = 0
+
+    def bind_tools(self, tools):
+        return BoundBudgetExhaustionModel(self)
+
+    async def ainvoke(self, messages):
+        self.unbound_calls += 1
+        assert "tool-call budget is exhausted" in messages[-1].content
+        return AIMessage(
+            content=(
+                "Use the retrieved BM25 result for the final answer. [S1]\n\n"
+                "Sources:\n- [S1] BM25, local corpus, bm25/bm25-1."
+            )
+        )
+
+
+class BoundBudgetExhaustionModel:
+    def __init__(self, parent: BudgetExhaustionModel) -> None:
+        self.parent = parent
+
+    async def ainvoke(self, messages):
+        self.parent.bound_calls += 1
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "search",
+                    "args": {
+                        "query": "bm25 keyword retrieval",
+                        "top_k": 1,
+                        "source": "local",
+                    },
+                    "id": "call-search",
+                }
+            ],
+        )
+
+
 class FakeQueryKitService:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -151,3 +192,40 @@ async def test_graph_executes_search_then_fetch_then_final_answer(
         "BM25 keyword retrieval"
     )
     assert search_span_output["results"][0]["citation_id"] == "S1"
+
+
+@pytest.mark.asyncio
+async def test_graph_forces_final_answer_when_tool_budget_is_exhausted() -> None:
+    search_service = SearchService(
+        [
+            DocumentChunk(
+                document_id="bm25",
+                chunk_id="bm25-1",
+                title="BM25",
+                source="test://bm25",
+                text="BM25 keyword retrieval ranks chunks without embeddings.",
+            )
+        ]
+    )
+    model = BudgetExhaustionModel()
+    graph = build_agent_graph(
+        model,
+        search_tool=SearchTool(search_service),
+        fetch_tool=FetchTool(search_service),
+        max_tool_calls=1,
+    )
+
+    result = await graph.ainvoke(
+        {
+            "messages": [],
+            "tool_call_count": 0,
+            "retrieved_context": [],
+            "final_answer": None,
+        }
+    )
+
+    assert model.bound_calls == 1
+    assert model.unbound_calls == 1
+    assert result["tool_call_count"] == 1
+    assert result["final_answer"].startswith("Use the retrieved BM25 result")
+    assert result["final_answer"].strip()
