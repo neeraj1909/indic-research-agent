@@ -89,13 +89,12 @@ class QueryKitService:
                 requested_provider_ids,
                 provider_ids,
             )
-            emit_agent_progress(
-                label="Query-kit providers normalized",
-                detail=(
+            _progress(
+                "Query-kit providers normalized",
+                (
                     f"requested={','.join(requested_provider_ids)}; "
                     f"using={','.join(provider_ids)}"
                 ),
-                step_type="retrieval",
             )
         if limit <= 0:
             raise ValueError("limit must be greater than 0")
@@ -109,12 +108,16 @@ class QueryKitService:
             "since_year": since_year,
             "timeout": self._settings.query_kit_timeout_seconds,
         }
-        if self._cache_service is not None:
-            cached = await self._cache_service.get_json(
-                "query-kit.search", cache_payload
+        if (
+            self._cache_service is not None
+            and (
+                cached := await self._cache_service.get_json(
+                    "query-kit.search", cache_payload
+                )
             )
-            if cached is not None:
-                return [SearchResult(**item) for item in cached]
+            is not None
+        ):
+            return [SearchResult(**item) for item in cached]
 
         start = time.perf_counter()
         timeout_seconds = max(0.1, self._settings.query_kit_timeout_seconds)
@@ -129,13 +132,12 @@ class QueryKitService:
             since_year,
             timeout_seconds,
         )
-        emit_agent_progress(
-            label="Query-kit search started",
-            detail=(
+        _progress(
+            "Query-kit search started",
+            (
                 f"providers={','.join(provider_ids)}; limit={limit}; "
                 f"timeout={timeout_seconds:.0f}s"
             ),
-            step_type="retrieval",
         )
         try:
             raw_results = await asyncio.wait_for(
@@ -156,25 +158,23 @@ class QueryKitService:
                 provider_ids,
                 timeout_seconds,
             )
-            emit_agent_progress(
-                label="Query-kit search timed out",
-                detail=(
+            _progress(
+                "Query-kit search timed out",
+                (
                     f"No public-provider results returned within "
                     f"{timeout_seconds:.0f}s ({elapsed_ms:.0f} ms elapsed)."
                 ),
-                step_type="retrieval",
             )
             return []
         except ProviderSearchError as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.warning("query-kit search failed: %s", exc)
-            emit_agent_progress(
-                label="Query-kit search failed",
-                detail=(
+            _progress(
+                "Query-kit search failed",
+                (
                     f"{exc}. Continuing without public-provider results "
                     f"after {elapsed_ms:.0f} ms."
                 ),
-                step_type="retrieval",
             )
             return []
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -184,10 +184,9 @@ class QueryKitService:
             len(raw_results),
             elapsed_ms,
         )
-        emit_agent_progress(
-            label="Query-kit search complete",
-            detail=f"{len(raw_results)} raw result(s) in {elapsed_ms:.0f} ms.",
-            step_type="retrieval",
+        _progress(
+            "Query-kit search complete",
+            f"{len(raw_results)} raw result(s) in {elapsed_ms:.0f} ms.",
         )
         results = [self._to_search_result(result) for result in raw_results]
         if self._cache_service is not None:
@@ -226,25 +225,23 @@ class QueryKitService:
                 "query-kit combined search failed; retrying providers individually: %s",
                 exc,
             )
-            emit_agent_progress(
-                label="Query-kit fallback",
-                detail=(
+            _progress(
+                "Query-kit fallback",
+                (
                     "Combined provider search failed; retrying individually: "
                     + ",".join(fallback_provider_ids)
                 ),
-                step_type="retrieval",
             )
 
         raw_results: list[Any] = []
         for provider_id in fallback_provider_ids:
             if _remaining_seconds(deadline) <= 0:
-                emit_agent_progress(
-                    label="Query-kit fallback budget exhausted",
-                    detail=(
+                _progress(
+                    "Query-kit fallback budget exhausted",
+                    (
                         f"Stopped before provider={provider_id}; "
                         "returning partial results."
                     ),
-                    step_type="retrieval",
                 )
                 break
             try:
@@ -261,11 +258,7 @@ class QueryKitService:
                 logger.warning(
                     "query-kit provider failed provider=%s: %s", provider_id, exc
                 )
-                emit_agent_progress(
-                    label="Query-kit provider failed",
-                    detail=f"provider={provider_id}: {exc}",
-                    step_type="retrieval",
-                )
+                _progress("Query-kit provider failed", f"provider={provider_id}: {exc}")
                 continue
             raw_results.extend(provider_results)
             if len(raw_results) >= limit:
@@ -303,10 +296,9 @@ class QueryKitService:
             since_year,
             remaining,
         )
-        emit_agent_progress(
-            label="Query-kit providers running",
-            detail=f"providers={','.join(provider_names)}; budget={remaining:.0f}s",
-            step_type="retrieval",
+        _progress(
+            "Query-kit providers running",
+            f"providers={','.join(provider_names)}; budget={remaining:.0f}s",
         )
 
         if len(provider_instances) == 1:
@@ -322,14 +314,13 @@ class QueryKitService:
                 provider_names,
                 len(results),
             )
-            emit_agent_progress(
-                label="Query-kit providers complete",
-                detail=f"providers={provider_names[0]}; results={len(results)}",
-                step_type="retrieval",
+            _progress(
+                "Query-kit providers complete",
+                f"providers={provider_names[0]}; results={len(results)}",
             )
             return results
 
-        tasks = {
+        tasks = [
             asyncio.create_task(
                 self._search_single_provider(
                     query=query,
@@ -338,46 +329,33 @@ class QueryKitService:
                     since_year=since_year,
                     deadline=deadline,
                 )
-            ): (index, _provider_id(provider))
-            for index, provider in enumerate(provider_instances)
-        }
+            )
+            for provider in provider_instances
+        ]
         start = time.perf_counter()
-        done, pending = await asyncio.wait(
+        _done, pending = await asyncio.wait(
             tasks,
             timeout=max(0.1, _remaining_seconds(deadline)),
         )
 
-        provider_result_sets_by_index: dict[int, Sequence[Any]] = {}
+        provider_result_sets: list[Sequence[Any]] = []
         failures: list[str] = []
-        for task in done:
-            provider_index, provider_name = tasks[task]
-            try:
-                provider_results = task.result()
-            except TimeoutError:
+        for index, task in enumerate(tasks):
+            provider_name = provider_names[index]
+            if task in pending:
+                task.cancel()
                 failures.append(f"{provider_name}: timed out")
-            except ProviderSearchError as exc:
-                failures.append(f"{provider_name}: {exc}")
+                logger.warning("query-kit.provider.timeout provider=%s", provider_name)
+                _progress(
+                    "Query-kit provider timed out",
+                    f"provider={provider_name}; budget exhausted",
+                )
+                continue
+            try:
+                provider_result_sets.append(task.result())
             except Exception as exc:
-                failures.append(f"{provider_name}: {type(exc).__name__}: {exc}")
-            else:
-                provider_result_sets_by_index[provider_index] = provider_results
-
-        for task in pending:
-            _provider_index, provider_name = tasks[task]
-            task.cancel()
-            failures.append(f"{provider_name}: timed out")
-            logger.warning("query-kit.provider.timeout provider=%s", provider_name)
-            emit_agent_progress(
-                label="Query-kit provider timed out",
-                detail=f"provider={provider_name}; budget exhausted",
-                step_type="retrieval",
-            )
-
-        provider_result_sets = [
-            provider_result_sets_by_index[index]
-            for index in range(len(provider_instances))
-            if index in provider_result_sets_by_index
-        ]
+                _status, failure = _provider_failure_outcome(exc)
+                failures.append(f"{provider_name}: {failure}")
         results = _merge_raw_result_sets(provider_result_sets, limit=limit)
         elapsed_ms = (time.perf_counter() - start) * 1000
         logger.info(
@@ -390,13 +368,12 @@ class QueryKitService:
             len(failures),
             elapsed_ms,
         )
-        emit_agent_progress(
-            label="Query-kit providers complete",
-            detail=(
+        _progress(
+            "Query-kit providers complete",
+            (
                 f"providers={','.join(provider_names)}; results={len(results)}; "
                 f"failures={len(failures)}; elapsed={elapsed_ms:.0f} ms"
             ),
-            step_type="retrieval",
         )
         if not provider_result_sets and failures:
             raise ProviderSearchError("all", "; ".join(failures))
@@ -424,10 +401,9 @@ class QueryKitService:
             since_year,
             remaining,
         )
-        emit_agent_progress(
-            label="Query-kit provider running",
-            detail=f"provider={provider_name}; budget={remaining:.0f}s",
-            step_type="retrieval",
+        _progress(
+            "Query-kit provider running",
+            f"provider={provider_name}; budget={remaining:.0f}s",
         )
         start = time.perf_counter()
         with trace_span(
@@ -459,105 +435,32 @@ class QueryKitService:
                     ),
                     timeout=remaining,
                 )
-            except TimeoutError:
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                set_span_attributes(
-                    provider_span,
-                    _provider_outcome_attributes(
-                        provider=provider_name,
-                        query=query,
-                        limit=limit,
-                        since_year=since_year,
-                        elapsed_ms=elapsed_ms,
-                        result_count=0,
-                        status="timeout",
-                        failure="timed out",
-                    ),
-                )
-                logger.warning(
-                    "query-kit.provider.timeout provider=%s elapsed_ms=%.0f",
-                    provider_name,
-                    elapsed_ms,
-                )
-                emit_agent_progress(
-                    label="Query-kit provider timed out",
-                    detail=f"provider={provider_name} after {elapsed_ms:.0f} ms",
-                    step_type="retrieval",
-                )
-                raise
-            except ProviderSearchError as exc:
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                set_span_attributes(
-                    provider_span,
-                    _provider_outcome_attributes(
-                        provider=provider_name,
-                        query=query,
-                        limit=limit,
-                        since_year=since_year,
-                        elapsed_ms=elapsed_ms,
-                        result_count=0,
-                        status="error",
-                        failure=str(exc),
-                    ),
-                )
-                logger.warning(
-                    "query-kit.provider.failed provider=%s elapsed_ms=%.0f error=%s",
-                    provider_name,
-                    elapsed_ms,
-                    exc,
-                )
-                emit_agent_progress(
-                    label="Query-kit provider failed",
-                    detail=f"provider={provider_name}: {exc}",
-                    step_type="retrieval",
-                )
-                raise
             except Exception as exc:
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                set_span_attributes(
+                status, failure = _provider_failure_outcome(exc)
+                elapsed_ms = _record_provider_outcome(
                     provider_span,
-                    _provider_outcome_attributes(
-                        provider=provider_name,
-                        query=query,
-                        limit=limit,
-                        since_year=since_year,
-                        elapsed_ms=elapsed_ms,
-                        result_count=0,
-                        status="error",
-                        failure=f"{type(exc).__name__}: {exc}",
-                    ),
-                )
-                logger.warning(
-                    (
-                        "query-kit.provider.failed provider=%s elapsed_ms=%.0f "
-                        "error=%s: %s"
-                    ),
-                    provider_name,
-                    elapsed_ms,
-                    type(exc).__name__,
-                    exc,
-                )
-                emit_agent_progress(
-                    label="Query-kit provider failed",
-                    detail=f"provider={provider_name}: {type(exc).__name__}: {exc}",
-                    step_type="retrieval",
-                )
-                raise ProviderSearchError(
-                    provider_name,
-                    f"{type(exc).__name__}: {exc}",
-                ) from exc
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            set_span_attributes(
-                provider_span,
-                _provider_outcome_attributes(
                     provider=provider_name,
                     query=query,
                     limit=limit,
                     since_year=since_year,
-                    elapsed_ms=elapsed_ms,
-                    result_count=len(results),
-                    status="ok",
-                ),
+                    start=start,
+                    result_count=0,
+                    status=status,
+                    failure=failure,
+                )
+                _log_provider_failure(provider_name, elapsed_ms, exc, failure)
+                if isinstance(exc, (TimeoutError, ProviderSearchError)):
+                    raise
+                raise ProviderSearchError(provider_name, failure) from exc
+            elapsed_ms = _record_provider_outcome(
+                provider_span,
+                provider=provider_name,
+                query=query,
+                limit=limit,
+                since_year=since_year,
+                start=start,
+                result_count=len(results),
+                status="ok",
             )
             set_span_output(
                 provider_span,
@@ -575,40 +478,89 @@ class QueryKitService:
             len(results),
             elapsed_ms,
         )
-        emit_agent_progress(
-            label="Query-kit provider complete",
-            detail=(
+        _progress(
+            "Query-kit provider complete",
+            (
                 f"provider={provider_name}; results={len(results)}; "
                 f"elapsed={elapsed_ms:.0f} ms"
             ),
-            step_type="retrieval",
         )
         return results
 
     def _to_search_result(self, result: Any) -> SearchResult:
-        title = str(result.title)
-        url = str(result.url)
-        source = str(result.source)
-        abstract = getattr(result, "abstract", None)
-        snippet = str(abstract or title)
-        result_id = _stable_result_id(title=title, url=url, source=source)
-        metadata = {
-            "result_type": "query-kit",
-            "url": url,
-            "provider": source,
-            "authors": list(getattr(result, "authors", ()) or ()),
-            "year": getattr(result, "year", None),
-            "venue": getattr(result, "venue", None),
-        }
+        title, url, source = str(result.title), str(result.url), str(result.source)
         return SearchResult(
-            document_id=result_id,
+            document_id=_stable_result_id(title=title, url=url, source=source),
             chunk_id="abstract",
             score=1.0,
             title=title,
             source=url,
-            snippet=snippet,
-            metadata=metadata,
+            snippet=str(getattr(result, "abstract", None) or title),
+            metadata={
+                "result_type": "query-kit",
+                "url": url,
+                "provider": source,
+                "authors": list(getattr(result, "authors", ()) or ()),
+                "year": getattr(result, "year", None),
+                "venue": getattr(result, "venue", None),
+            },
         )
+
+
+def _progress(label: str, detail: str) -> None:
+    emit_agent_progress(label=label, detail=detail, step_type="retrieval")
+
+
+def _record_provider_outcome(span: Any, *, start: float, **attrs: Any) -> float:
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    set_span_attributes(
+        span,
+        _provider_outcome_attributes(elapsed_ms=elapsed_ms, **attrs),
+    )
+    return elapsed_ms
+
+
+def _provider_failure_outcome(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, TimeoutError):
+        return "timeout", "timed out"
+    if isinstance(exc, ProviderSearchError):
+        return "error", str(exc)
+    return "error", f"{type(exc).__name__}: {exc}"
+
+
+def _log_provider_failure(
+    provider_name: str,
+    elapsed_ms: float,
+    exc: Exception,
+    failure: str,
+) -> None:
+    if isinstance(exc, TimeoutError):
+        logger.warning(
+            "query-kit.provider.timeout provider=%s elapsed_ms=%.0f",
+            provider_name,
+            elapsed_ms,
+        )
+        _progress(
+            "Query-kit provider timed out",
+            f"provider={provider_name} after {elapsed_ms:.0f} ms",
+        )
+        return
+    if isinstance(exc, ProviderSearchError):
+        logger.warning(
+            "query-kit.provider.failed provider=%s elapsed_ms=%.0f error=%s",
+            provider_name,
+            elapsed_ms,
+            exc,
+        )
+    else:
+        logger.warning(
+            "query-kit.provider.failed provider=%s elapsed_ms=%.0f error=%s: %s",
+            provider_name,
+            elapsed_ms,
+            type(exc).__name__,
+            exc,
+        )
+    _progress("Query-kit provider failed", f"provider={provider_name}: {failure}")
 
 
 def _provider_outcome_attributes(
@@ -662,9 +614,7 @@ def _http_status_from_message(message: str) -> int | None:
     import re
 
     match = re.search(r"HTTP\s+(\d{3})", message, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return int(match.group(1))
+    return int(match.group(1)) if match else None
 
 
 def _stable_result_id(*, title: str, url: str, source: str) -> str:
@@ -740,10 +690,8 @@ def _normalize_provider_ids(
             continue
         if normalized not in resolved:
             resolved.append(normalized)
-    if resolved:
-        return resolved
-    if list(provider_ids) == list(default_provider_ids):
-        return ["all"]
+    if resolved or list(provider_ids) == list(default_provider_ids):
+        return resolved or ["all"]
     return _normalize_provider_ids(
         default_provider_ids,
         default_provider_ids=default_provider_ids,
@@ -751,18 +699,10 @@ def _normalize_provider_ids(
 
 
 def _fallback_provider_ids(provider_ids: Sequence[str]) -> list[str]:
-    if any(provider_id == "all" for provider_id in provider_ids):
+    if "all" in provider_ids:
         return list(FALLBACK_PROVIDER_IDS)
     return list(dict.fromkeys(provider_ids))
 
 
 def _search_result_to_dict(result: SearchResult) -> dict[str, Any]:
-    return {
-        "document_id": result.document_id,
-        "chunk_id": result.chunk_id,
-        "score": result.score,
-        "snippet": result.snippet,
-        "title": result.title,
-        "source": result.source,
-        "metadata": dict(result.metadata),
-    }
+    return {**vars(result), "metadata": dict(result.metadata)}
