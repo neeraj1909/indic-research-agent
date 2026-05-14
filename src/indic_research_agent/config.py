@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -70,6 +71,33 @@ class AppSettings(BaseSettings):
     )
     chainlit_database_schema: str = "chainlit"
     chainlit_data_layer_show_logger: bool = False
+
+    browser_cookie_jar_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BROWSER_COOKIE_JAR_ENABLED"),
+    )
+    browser_cdp_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("BROWSER_CDP_ENDPOINT", "CDP_ENDPOINT"),
+    )
+    browser_cookie_jar_path: Path = Field(
+        default=Path("tmp/browser-cookie-jar/cookies.local.json"),
+        validation_alias=AliasChoices("BROWSER_COOKIE_JAR_PATH"),
+    )
+    browser_cookie_jar_sync_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        validation_alias=AliasChoices("BROWSER_COOKIE_JAR_SYNC_INTERVAL_SECONDS"),
+    )
+    browser_cookie_jar_startup_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        validation_alias=AliasChoices("BROWSER_COOKIE_JAR_STARTUP_TIMEOUT_SECONDS"),
+    )
+    browser_cookie_jar_fail_on_error: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BROWSER_COOKIE_JAR_FAIL_ON_ERROR"),
+    )
 
     @property
     def query_kit_provider_ids(self) -> list[str]:

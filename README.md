@@ -353,6 +353,13 @@ It reads environment variables and `.env` with `extra="ignore"`.
 | `QUERY_KIT_PROVIDERS` | `semantic-scholar,semantic-scholar-web,pubmed,arxiv-web` | Comma-separated provider IDs. Supported values include `acl`, `arxiv`, `arxiv-web`, `pubmed`, `semantic-scholar`, `semantic-scholar-web`, `openreview`, and `all`. Default uses the measured fast/partial-safe provider set plus safe public-web fallbacks for Indic OCR queries. |
 | `QUERY_KIT_TIMEOUT_SECONDS` | `30` | Overall public-provider budget for query-kit search; the UI emits per-provider progress/timeout steps and continues with partial/local BM25 results on timeout. |
 | `QUERY_CLI_USER_AGENT` | `indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)` | Project-specific User-Agent passed through query-kit for ordinary HTTP public-web providers such as `arxiv-web` and `semantic-scholar-web`. |
+| `BROWSER_COOKIE_JAR_ENABLED` | `true` | Enables the persistent browser-cookie jar service for authorized browser automation. When enabled without `BROWSER_CDP_ENDPOINT`, the jar can still be created but CDP sync is a no-op. |
+| `BROWSER_CDP_ENDPOINT` | none | Optional authorized Chrome/Chromium DevTools Protocol endpoint (`http://host:9222` or `ws://.../devtools/browser/...`). The app does not install or launch Chrome. |
+| `CDP_ENDPOINT` | none | Backward-compatible alias for `BROWSER_CDP_ENDPOINT`. |
+| `BROWSER_COOKIE_JAR_PATH` | `tmp/browser-cookie-jar/cookies.local.json` in code; Compose defaults to `/data/browser-cookies/cookies.json` | Disk JSON cookie jar path. Compose mounts `/data/browser-cookies` from the `browser_cookie_data` named volume so the jar survives app container recreation. |
+| `BROWSER_COOKIE_JAR_SYNC_INTERVAL_SECONDS` | `30` | Background CDP-to-disk cookie sync interval. |
+| `BROWSER_COOKIE_JAR_STARTUP_TIMEOUT_SECONDS` | `10` | Startup CDP apply/read timeout budget. |
+| `BROWSER_COOKIE_JAR_FAIL_ON_ERROR` | `false` | If true, cookie-sync failures exit non-zero; by default they are logged/surfaced as sanitized status and do not block the app. |
 | `PHOENIX_ENABLED` | `false` in code; Compose/.env example use `true` | Enables OpenTelemetry trace export to Phoenix. |
 | `PHOENIX_COLLECTOR_ENDPOINT` | `http://10.20.30.1:16006` | Phoenix app hostname; OTLP/HTTP traces are sent to `/v1/traces` under this endpoint. |
 | `PHOENIX_PROJECT_NAME` | `indic-research-agent` | Phoenix project name for agent traces. |
@@ -402,6 +409,16 @@ QUERY_KIT_PROVIDERS=semantic-scholar,semantic-scholar-web,pubmed,arxiv-web
 QUERY_KIT_TIMEOUT_SECONDS=30
 QUERY_CLI_USER_AGENT=indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)
 
+# Authorized browser cookie persistence via external CDP.
+BROWSER_COOKIE_JAR_ENABLED=true
+BROWSER_CDP_ENDPOINT=
+# Local default if omitted: tmp/browser-cookie-jar/cookies.local.json
+# Docker Compose defaults this to /data/browser-cookies/cookies.json.
+# BROWSER_COOKIE_JAR_PATH=tmp/browser-cookie-jar/cookies.local.json
+BROWSER_COOKIE_JAR_SYNC_INTERVAL_SECONDS=30
+BROWSER_COOKIE_JAR_STARTUP_TIMEOUT_SECONDS=10
+BROWSER_COOKIE_JAR_FAIL_ON_ERROR=false
+
 # Phoenix observability.
 PHOENIX_ENABLED=true
 PHOENIX_COLLECTOR_ENDPOINT=http://10.20.30.1:16006
@@ -421,6 +438,52 @@ CHAINLIT_AUTH_USERNAME=test
 CHAINLIT_AUTH_PASSWORD=test1234
 CHAINLIT_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent
 CHAINLIT_DATABASE_SCHEMA=chainlit
+```
+
+### Persistent browser cookie jar
+
+The browser cookie jar is for **authorized browser automation sessions only**.
+It talks to an already-running Chrome/Chromium DevTools Protocol endpoint with
+`Storage.setCookies` and `Storage.getCookies`; this repository does not install,
+launch, or manage Chrome.
+
+Operational behavior:
+
+1. `CookieJarStore` creates a versioned JSON jar if it is missing and writes it
+   atomically with restrictive permissions where the filesystem supports chmod.
+2. `scripts/sync_browser_cookies.py --startup` applies existing jar cookies to
+   the configured CDP endpoint and then snapshots active browser cookies back to
+   disk.
+3. `scripts/sync_browser_cookies.py --watch` keeps syncing at
+   `BROWSER_COOKIE_JAR_SYNC_INTERVAL_SECONDS` and performs a final sync on
+   graceful shutdown.
+4. `scripts/start_app.sh` runs the watcher as a background child before
+   Chainlit when `BROWSER_COOKIE_JAR_ENABLED` is truthy.
+
+Docker Compose mounts `browser_cookie_data:/data/browser-cookies`, so the
+container jar path defaults to `/data/browser-cookies/cookies.json` and survives
+app container recreation. Local non-Docker runs can omit `BROWSER_COOKIE_JAR_PATH`
+to use the git-ignored default `tmp/browser-cookie-jar/cookies.local.json`.
+
+Security boundaries:
+
+- Cookie values are secrets. Do not commit, paste, print, trace, or share cookie
+  jar files. `tmp/` and `*.local.json` are ignored for local probes.
+- Logs and CLI status intentionally report only sanitized fields such as action,
+  counts, endpoint-configured yes/no, and jar path; cookie names/values are not
+  emitted.
+- Set `BROWSER_CDP_ENDPOINT` only to an active browser you are authorized to use.
+  Do not use this feature to bypass access controls, paywalls, rate limits, WAFs,
+  or API-key requirements.
+- The current deployment assumes one app writer for the jar. Multi-replica cookie
+  jar writes are unsupported until a separate coordination design exists.
+
+Manual sanitized probe:
+
+```bash
+BROWSER_CDP_ENDPOINT=http://127.0.0.1:9222 \
+BROWSER_COOKIE_JAR_PATH=tmp/browser-cookie-jar/live-cookies.local.json \
+uv run python scripts/sync_browser_cookies.py --once --json | jq '{ok,action,cookie_count,jar_path}'
 ```
 
 ### Chainlit settings
@@ -463,6 +526,8 @@ docker compose ps
 - `app` listening on `http://localhost:8000`
 - `postgres` healthy on localhost port `5432`
 - `redis` healthy on localhost port `6379`
+
+Compose mounts `browser_cookie_data:/data/browser-cookies` for the persistent browser cookie jar. The jar path defaults to `/data/browser-cookies/cookies.json` inside the app container and survives app container recreation. Set `BROWSER_CDP_ENDPOINT` only to an authorized active browser CDP endpoint; this app does not install or launch Chrome/Chromium.
 
 ### Option B: Local Chainlit process with separately running services
 

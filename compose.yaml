@@ -24,6 +24,12 @@ services:
       QUERY_KIT_PROVIDERS: ${QUERY_KIT_PROVIDERS:-semantic-scholar,semantic-scholar-web,pubmed,arxiv-web}
       QUERY_KIT_TIMEOUT_SECONDS: ${QUERY_KIT_TIMEOUT_SECONDS:-30}
       QUERY_CLI_USER_AGENT: ${QUERY_CLI_USER_AGENT:-indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)}
+      BROWSER_COOKIE_JAR_ENABLED: ${BROWSER_COOKIE_JAR_ENABLED:-true}
+      BROWSER_CDP_ENDPOINT: ${BROWSER_CDP_ENDPOINT:-}
+      BROWSER_COOKIE_JAR_PATH: ${BROWSER_COOKIE_JAR_PATH:-/data/browser-cookies/cookies.json}
+      BROWSER_COOKIE_JAR_SYNC_INTERVAL_SECONDS: ${BROWSER_COOKIE_JAR_SYNC_INTERVAL_SECONDS:-30}
+      BROWSER_COOKIE_JAR_STARTUP_TIMEOUT_SECONDS: ${BROWSER_COOKIE_JAR_STARTUP_TIMEOUT_SECONDS:-10}
+      BROWSER_COOKIE_JAR_FAIL_ON_ERROR: ${BROWSER_COOKIE_JAR_FAIL_ON_ERROR:-false}
       PHOENIX_ENABLED: ${PHOENIX_ENABLED:-true}
       PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-http://10.20.30.1:16006}
       PHOENIX_PROJECT_NAME: ${PHOENIX_PROJECT_NAME:-indic-research-agent}
@@ -32,6 +38,8 @@ services:
       PHOENIX_AUTO_INSTRUMENT: ${PHOENIX_AUTO_INSTRUMENT:-true}
     ports:
       - "8000:8000"
+    volumes:
+      - browser_cookie_data:/data/browser-cookies
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,3 +74,4 @@ services:
 
 volumes:
   postgres_data:
+  browser_cookie_data:

@@ -24,6 +24,7 @@ dependencies = [
     "query-kit @ git+https://github.com/neeraj1909/query-kit.git",
     "redis>=5.0",
     "sqlalchemy[asyncio]>=2.0",
+    "websockets>=13.0",
 ]
 
 [dependency-groups]
