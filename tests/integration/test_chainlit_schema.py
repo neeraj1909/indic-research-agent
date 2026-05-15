@@ -41,6 +41,8 @@ async def _assert_chainlit_schema() -> None:
                     SELECT
                         to_regclass('public.users') AS public_users,
                         to_regclass('public.queries') AS public_queries,
+                        to_regclass('public.documents') AS public_documents,
+                        to_regclass('public.document_chunks') AS public_document_chunks,
                         to_regclass('chainlit.users') AS chainlit_users,
                         to_regclass('chainlit.threads') AS chainlit_threads,
                         to_regclass('chainlit.steps') AS chainlit_steps,
@@ -62,6 +64,8 @@ async def _assert_chainlit_schema() -> None:
 
     assert row["public_users"] == "users"
     assert row["public_queries"] == "queries"
+    assert row["public_documents"] is None
+    assert row["public_document_chunks"] is None
     assert row["chainlit_users"] == "chainlit.users"
     assert row["chainlit_threads"] == "chainlit.threads"
     assert row["chainlit_steps"] == "chainlit.steps"

@@ -1,7 +1,7 @@
 [project]
 name = "indic-research-agent"
 version = "0.1.0"
-description = "BM25-first research agent using query-kit, LiteLLM, LangGraph, Chainlit, PostgreSQL, and Redis."
+description = "Public research agent using query-kit, LiteLLM, LangGraph, Chainlit, PostgreSQL, and Redis."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -9,7 +9,6 @@ dependencies = [
     "arize-phoenix==12.31.2",
     "arize-phoenix-otel>=0.16.1",
     "asyncpg>=0.29",
-    "bm25s>=0.2.0",
     "chainlit>=2.0",
     "langchain>=0.3",
     "langchain-community>=0.3",

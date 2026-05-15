@@ -25,7 +25,7 @@ def test_smoke_query_cli_exercises_agent_stack() -> None:
             sys.executable,
             "scripts/smoke_query.py",
             "--question",
-            "How does BM25 retrieval support this smoke run?",
+            "Find public research on Hindi OCR for this smoke run.",
             "--cache-ttl-seconds",
             "60",
         ],
@@ -38,7 +38,7 @@ def test_smoke_query_cli_exercises_agent_stack() -> None:
 
     assert payload["answer"]
     assert payload["source_ids"]
-    assert payload["tool_call_count"] == 2
-    assert payload["persisted_tool_calls"] >= 2
-    assert payload["cache_hits"] >= 2
-    assert payload["cache_namespaces"] == ["tool.fetch", "tool.search"]
+    assert payload["tool_call_count"] == 1
+    assert payload["persisted_tool_calls"] >= 1
+    assert payload["cache_hits"] >= 1
+    assert payload["cache_namespaces"] == ["tool.search"]

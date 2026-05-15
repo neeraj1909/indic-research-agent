@@ -14,8 +14,6 @@ def test_expected_tables_are_registered() -> None:
     assert set(Base.metadata.tables) == {
         "agent_responses",
         "cache_metadata",
-        "document_chunks",
-        "documents",
         "queries",
         "tool_calls",
         "users",
@@ -31,4 +29,8 @@ def test_schema_compiles_for_postgresql() -> None:
     ]
 
     assert any("CREATE TABLE users" in statement for statement in compiled)
-    assert any("CREATE TABLE document_chunks" in statement for statement in compiled)
+    assert any("CREATE TABLE queries" in statement for statement in compiled)
+    assert all("CREATE TABLE documents" not in statement for statement in compiled)
+    assert all(
+        "CREATE TABLE document_chunks" not in statement for statement in compiled
+    )

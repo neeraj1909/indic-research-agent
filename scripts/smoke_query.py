@@ -1,4 +1,4 @@
-"""End-to-end smoke query for the BM25-first agent stack."""
+"""End-to-end smoke query for the public research search agent stack."""
 
 from __future__ import annotations
 
@@ -18,15 +18,10 @@ from indic_research_agent.db.base import Base
 from indic_research_agent.db.session import create_engine, create_session_factory
 from indic_research_agent.models import CacheMetadata, ToolCall
 from indic_research_agent.repositories import CacheMetadataRepository
-from indic_research_agent.retrieval import SearchService
 from indic_research_agent.services.cache_service import CacheService
-from indic_research_agent.services.document_service import (
-    DocumentChunkInput,
-    DocumentService,
-)
 from indic_research_agent.services.query_service import QueryService
-from indic_research_agent.tools.fetch import FetchTool
-from indic_research_agent.tools.schemas import FetchToolInput, SearchToolInput
+from indic_research_agent.services.search_results import SearchResult
+from indic_research_agent.tools.schemas import SearchToolInput
 from indic_research_agent.tools.search import SearchTool
 
 
@@ -49,11 +44,9 @@ class SmokeToolCallingModel:
         self,
         *,
         search_input: SearchToolInput,
-        fetch_input: FetchToolInput,
         source_id: str,
     ) -> None:
         self._search_input = search_input
-        self._fetch_input = fetch_input
         self._source_id = source_id
         self.calls = 0
 
@@ -73,23 +66,50 @@ class SmokeToolCallingModel:
                     }
                 ],
             )
-        if self.calls == 2:
-            return AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "fetch",
-                        "args": self._fetch_input.model_dump(mode="json"),
-                        "id": "smoke-fetch",
-                    }
-                ],
-            )
         return AIMessage(
             content=(
-                "BM25 lexical retrieval found the seeded smoke document, fetched "
-                f"its evidence, and answered with source {self._source_id}."
+                "Public research search found the deterministic smoke source "
+                f"{self._source_id} and answered with provider-backed evidence."
             )
         )
+
+
+class SmokeQueryKitService:
+    """Deterministic public-research provider stand-in for smoke validation."""
+
+    def __init__(self, *, run_token: str, source_id: str) -> None:
+        self._run_token = run_token
+        self._source_id = source_id
+        self.calls: list[dict[str, object]] = []
+
+    async def search(self, query, *, providers=None, limit=5, since_year=None):
+        self.calls.append(
+            {
+                "query": query,
+                "providers": providers,
+                "limit": limit,
+                "since_year": since_year,
+            }
+        )
+        return [
+            SearchResult(
+                document_id=self._source_id,
+                chunk_id="abstract",
+                score=1.0,
+                title="Deterministic Hindi OCR public research smoke source",
+                source=f"https://example.test/research/{self._run_token}",
+                snippet=(
+                    f"{self._run_token} verifies public research search, "
+                    "query-kit-compatible tool calls, Redis cache hits, and "
+                    "PostgreSQL persistence without local document search."
+                ),
+                metadata={
+                    "provider": "smoke-public-provider",
+                    "year": 2026,
+                    "run_token": self._run_token,
+                },
+            )
+        ][:limit]
 
 
 async def run_smoke_query(
@@ -101,7 +121,7 @@ async def run_smoke_query(
 ) -> SmokeResult:
     settings = settings or AppSettings()
     run_token = f"smoke-{uuid4().hex[:10]}"
-    source_id = ""
+    source_id = f"query-kit:smoke:{run_token}"
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine=engine)
@@ -114,25 +134,6 @@ async def run_smoke_query(
                 await connection.run_sync(Base.metadata.create_all)
 
         async with session_factory() as session:
-            document_service = DocumentService(session)
-            document = await document_service.add_document(
-                title=f"BM25 smoke document {run_token}",
-                source_uri=f"smoke://{run_token}",
-                metadata={"kind": "smoke", "run_token": run_token},
-                chunks=[
-                    DocumentChunkInput(
-                        chunk_key="smoke-chunk-1",
-                        text=(
-                            f"{run_token} verifies BM25 keyword retrieval without "
-                            "embeddings, query-kit-compatible search tooling, "
-                            "LangGraph tool calls, Redis cache hits, and "
-                            "PostgreSQL persistence."
-                        ),
-                        token_count=24,
-                        metadata={"run_token": run_token},
-                    )
-                ],
-            )
             query_service = QueryService(session)
             query = await query_service.record_query(
                 text=question,
@@ -140,46 +141,35 @@ async def run_smoke_query(
             )
             await session.commit()
 
-        source_id = f"{document.id}#smoke-chunk-1"
         search_input = SearchToolInput(
             query=f"{question} {run_token}",
             top_k=5,
-            source="local",
-        )
-        fetch_input = FetchToolInput(
-            document_id=str(document.id),
-            chunk_id="smoke-chunk-1",
-            max_chars=500,
+            providers=["semantic-scholar", "pubmed", "arxiv-web"],
+            since_year=2020,
         )
 
         async with session_factory() as session:
-            document_service = DocumentService(session)
-            chunks = await document_service.list_retrieval_chunks()
-            search_service = SearchService(chunks)
             cache_service = CacheService(
                 redis,
                 default_ttl_seconds=cache_ttl_seconds,
                 metadata_repository=CacheMetadataRepository(session),
             )
-            search_tool = SearchTool(
-                search_service,
-                cache_service=cache_service,
-                cache_ttl_seconds=cache_ttl_seconds,
+            querykit_service = SmokeQueryKitService(
+                run_token=run_token,
+                source_id=source_id,
             )
-            fetch_tool = FetchTool(
-                search_service,
+            search_tool = SearchTool(
+                querykit_service,
                 cache_service=cache_service,
                 cache_ttl_seconds=cache_ttl_seconds,
             )
             model = SmokeToolCallingModel(
                 search_input=search_input,
-                fetch_input=fetch_input,
                 source_id=source_id,
             )
             graph = build_agent_graph(
                 model,
                 search_tool=search_tool,
-                fetch_tool=fetch_tool,
             )
             state = await graph.ainvoke(
                 {
@@ -191,18 +181,14 @@ async def run_smoke_query(
             )
 
             search_payload = json.loads(state["retrieved_context"][0])
-            fetch_payload = json.loads(state["retrieved_context"][1])
-            if not any(
-                item["document_id"] == str(document.id) for item in search_payload
-            ):
+            if not any(item["document_id"] == source_id for item in search_payload):
                 raise RuntimeError(
-                    "BM25 search did not return the seeded smoke document"
+                    "Public research search did not return the smoke source"
                 )
-            if run_token not in fetch_payload["content"]:
-                raise RuntimeError("Fetch did not return seeded smoke content")
+            if run_token not in search_payload[0]["snippet"]:
+                raise RuntimeError("Search did not return smoke source content")
 
             await search_tool.run(search_input)
-            await fetch_tool.run(fetch_input)
 
             query_service = QueryService(session)
             await query_service.record_tool_call(
@@ -214,24 +200,13 @@ async def run_smoke_query(
                     "document_ids": [item["document_id"] for item in search_payload],
                 },
             )
-            await query_service.record_tool_call(
-                query_id=query.id,
-                tool_name="fetch",
-                arguments=fetch_input.model_dump(mode="json"),
-                result_summary={
-                    "document_id": fetch_payload["document_id"],
-                    "chunk_id": fetch_payload["chunk_id"],
-                    "content_chars": len(fetch_payload["content"]),
-                },
-            )
             response = await query_service.record_response(
                 query_id=query.id,
                 answer=state["final_answer"],
                 citations=[
                     {
-                        "document_id": str(document.id),
-                        "chunk_id": "smoke-chunk-1",
-                        "source": f"smoke://{run_token}",
+                        "document_id": source_id,
+                        "source": f"https://example.test/research/{run_token}",
                     }
                 ],
                 model_metadata={"model": "smoke-tool-calling-model"},
@@ -242,7 +217,7 @@ async def run_smoke_query(
             cache_rows = (
                 await session.execute(
                     select(CacheMetadata).where(
-                        CacheMetadata.namespace.in_(["tool.search", "tool.fetch"])
+                        CacheMetadata.namespace == "tool.search"
                     )
                 )
             ).scalars()
@@ -255,12 +230,10 @@ async def run_smoke_query(
             persisted_tool_calls = len(list(tool_calls))
 
         cache_hits = sum(row.hit_count for row in cache_metadata)
-        if cache_hits < 2:
-            raise RuntimeError(
-                "Expected repeated search/fetch calls to hit Redis cache"
-            )
-        if persisted_tool_calls < 2:
-            raise RuntimeError("Expected persisted search and fetch tool calls")
+        if cache_hits < 1:
+            raise RuntimeError("Expected repeated search call to hit Redis cache")
+        if persisted_tool_calls < 1:
+            raise RuntimeError("Expected persisted search tool call")
 
         return SmokeResult(
             answer=state["final_answer"],
@@ -281,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--question",
-        default="How does BM25 retrieval support this agent?",
+        default="Find public research on Hindi OCR.",
         help="Question to send through the deterministic smoke graph.",
     )
     parser.add_argument(
@@ -293,7 +266,7 @@ def parse_args() -> argparse.Namespace:
         "--cache-ttl-seconds",
         type=int,
         default=60,
-        help="TTL for smoke search/fetch cache entries.",
+        help="TTL for smoke search cache entries.",
     )
     return parser.parse_args()
 

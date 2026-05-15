@@ -11,10 +11,6 @@ from indic_research_agent.db.base import Base
 from indic_research_agent.db.session import create_engine, create_session_factory
 from indic_research_agent.models import AgentResponse, ToolCall
 from indic_research_agent.repositories import UserRepository
-from indic_research_agent.services.document_service import (
-    DocumentChunkInput,
-    DocumentService,
-)
 from indic_research_agent.services.query_service import QueryService
 
 pytestmark = pytest.mark.integration
@@ -42,41 +38,29 @@ async def session_factory():
 
 
 @pytest.mark.asyncio
-async def test_query_document_tool_response_roundtrip(session_factory) -> None:
+async def test_query_tool_response_roundtrip(session_factory) -> None:
     async with session_factory() as session:
         user = await UserRepository(session).add(
             external_id="test-user",
             display_name="Test User",
         )
-        document = await DocumentService(session).add_document(
-            title="BM25",
-            source_uri="test://bm25",
-            metadata={"kind": "test"},
-            chunks=[
-                DocumentChunkInput(
-                    chunk_key="chunk-1",
-                    text="BM25 keyword retrieval without vector search.",
-                    token_count=6,
-                )
-            ],
-        )
         query_service = QueryService(session)
         query = await query_service.record_query(
-            text="What is BM25?",
+            text="What did the public search tool return?",
             user_id=user.id,
             session_id="session-1",
         )
         tool_call = await query_service.record_tool_call(
             query_id=query.id,
             tool_name="search",
-            arguments={"query": "BM25"},
-            result_summary={"document_id": str(document.id)},
+            arguments={"query": "Hindi OCR"},
+            result_summary={"document_id": "query-kit:test-source"},
             latency_ms=1.5,
         )
         response = await query_service.record_response(
             query_id=query.id,
-            answer="BM25 is keyword retrieval.",
-            citations=[{"document_id": str(document.id)}],
+            answer="The public search tool returned a provider-backed source.",
+            citations=[{"document_id": "query-kit:test-source"}],
             model_metadata={"model": "test"},
         )
         await session.commit()
@@ -88,4 +72,7 @@ async def test_query_document_tool_response_roundtrip(session_factory) -> None:
     assert tool_calls[0].id == tool_call.id
     assert tool_calls[0].tool_name == "search"
     assert responses[0].id == response.id
-    assert responses[0].answer == "BM25 is keyword retrieval."
+    assert (
+        responses[0].answer
+        == "The public search tool returned a provider-backed source."
+    )
