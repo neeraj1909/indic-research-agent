@@ -1,13 +1,13 @@
 # indic-research-agent
 
-`indic-research-agent` is a BM25-first research assistant with a Chainlit web UI,
-LangGraph tool orchestration, LiteLLM model access, query-kit public research
-search, PostgreSQL persistence, and Redis-backed caching.
+`indic-research-agent` is a public research assistant with a Chainlit web UI,
+LangGraph tool orchestration, LiteLLM model access, query-kit provider search,
+PostgreSQL persistence, and Redis-backed caching.
 
-The project is intentionally keyword/BM25-first. It does **not** use embeddings,
-vector databases, `pgvector`, FAISS, Chroma, Milvus, Weaviate, Pinecone,
-sentence-transformers, or embedding API calls. A unit test guards against adding
-common vector/embedding packages as direct dependencies.
+The project intentionally does **not** use embeddings, vector databases,
+`pgvector`, FAISS, Chroma, Milvus, Weaviate, Pinecone, sentence-transformers, or
+embedding API calls. A unit test guards against adding common vector/embedding
+packages as direct dependencies.
 
 ## Table of contents
 
@@ -33,18 +33,16 @@ common vector/embedding packages as direct dependencies.
 
 The application answers research questions by combining:
 
-1. local keyword retrieval over document chunks using BM25;
-2. public research search through `query-kit` providers;
-3. a LangGraph tool-calling loop with `search` and `fetch` tools;
-4. a LiteLLM-compatible chat model for synthesis;
-5. a Chainlit UI with local password auth, resumable chat history, progress
+1. public research search through `query-kit` providers;
+2. a LangGraph tool-calling loop with a typed `search` tool;
+3. a LiteLLM-compatible chat model for synthesis;
+4. a Chainlit UI with local password auth, resumable chat history, progress
    steps, and answer streaming/fallback updates.
 
 ### Core use cases
 
-- Explore a small local document corpus without vector infrastructure.
-- Search public research providers through query-kit from the same agent flow.
-- Evaluate BM25-first retrieval and tool-calling behavior with deterministic
+- Search public research providers through query-kit from the agent flow.
+- Evaluate public-provider search and tool-calling behavior with deterministic
   tests and smoke scripts.
 - Run a local Chainlit chat surface that shows progress while long research
   calls execute.
@@ -58,9 +56,9 @@ The application answers research questions by combining:
 | Authentication | Chainlit password auth via `AuthService`; local/e2e user defaults to `test` / `test1234`. |
 | Chat history | Chainlit SQLAlchemy data layer backed by PostgreSQL schema `chainlit`; `@cl.on_chat_resume` restores runtime state. |
 | Streaming/progress | Agent emits framework-neutral events; Chainlit renders progress `Step`s and streams answer text when chunks are available. |
-| Retrieval | In-memory BM25 index over seed chunks for the default UI graph; database-backed chunks are available through services and smoke tests. |
-| Public research search | `QueryKitService` wraps `query-kit` providers. |
-| Persistence/audit | App tables store users, documents, chunks, queries, tool calls, responses, and cache metadata. |
+| Public research search | `QueryKitService` wraps `query-kit` providers and is the only retrieval mode exposed to the agent/UI. |
+| Local document search | Not implemented in this app version; uploads are not ingested or indexed into a project corpus. |
+| Persistence/audit | App tables store users, queries, tool calls, responses, and cache metadata. Legacy document/chunk tables may exist from earlier revisions but are not used for runtime retrieval. |
 | Cache | Redis JSON cache for query-kit/tool results, with namespace TTL policy. |
 | Model provider | LiteLLM via `langchain-litellm`; optional OpenAI-compatible streaming proxy adapter for `chatgpt/*` model IDs. |
 | Docker | Compose starts app, PostgreSQL, and Redis; the app runs Alembic migrations before Chainlit. |
@@ -75,10 +73,9 @@ The application answers research questions by combining:
 | Controller | `src/indic_research_agent/controllers/chat_controller.py` | Thin UI-facing boundary. Holds JSON-safe message history/session metadata and delegates to `AgentService`. |
 | Agent service | `src/indic_research_agent/services/agent_service.py`, `src/indic_research_agent/services/agent_events.py` | Converts chat history into LangChain messages, streams LangGraph events, preserves the one-shot `answer()` API, and optionally records query/tool/response audit rows. |
 | LangGraph agent | `src/indic_research_agent/agent/graph.py`, `state.py`, `prompts.py`, `llm.py`, `openai_streaming.py` | Builds the LLM/tool loop, binds tools, emits custom progress events, and creates the LiteLLM-backed model. |
-| Tools | `src/indic_research_agent/tools/search.py`, `fetch.py`, `schemas.py` | Typed `search` and `fetch` tool implementations. |
-| Retrieval | `src/indic_research_agent/retrieval/` | BM25 tokenizer/index, search/fetch contracts, and seed corpus. |
+| Tools | `src/indic_research_agent/tools/search.py`, `schemas.py` | Typed public research `search` tool implementation. |
 | External research | `src/indic_research_agent/services/querykit_service.py` | Async wrapper around `query-kit` search providers with fallback behavior. |
-| Persistence | `src/indic_research_agent/models/`, `repositories/`, `services/query_service.py`, `services/document_service.py` | SQLAlchemy models/repositories and service APIs for app-owned audit/document/cache data. |
+| Persistence | `src/indic_research_agent/models/`, `repositories/`, `services/query_service.py` | SQLAlchemy models/repositories and service APIs for app-owned audit/cache data. |
 | Chainlit persistence | `src/indic_research_agent/services/chainlit_data_layer.py`, `migrations/versions/20260505_0002_chainlit_schema.py`, `20260505_0003_chainlit_step_autocollapse.py` | Chainlit SQLAlchemy data layer configured with Postgres `search_path=chainlit` and its required tables. |
 | Cache | `src/indic_research_agent/services/cache_service.py`, `cache_policy.py` | Redis-backed JSON cache and namespace TTL policy. |
 
@@ -92,8 +89,8 @@ Browser
   -> AgentService.stream_answer(...)
   -> LangGraph graph.astream(stream_mode=["updates", "messages", "custom"])
   -> LiteLLM chat model
-  -> search/fetch tools
-  -> local BM25 SearchService and/or query-kit public providers
+  -> public research search tool
+  -> query-kit public providers
   -> AgentStreamEvent objects
   -> Chainlit Message.stream_token(...) and Step progress UI
   -> Chainlit history tables in schema chainlit
@@ -110,16 +107,15 @@ the agent to:
   ASR, Marathi legal text classification, Tamil passage translation/analysis,
   and Indic evaluation benchmarks;
 - ask clarification questions only when language, script, domain, timeframe,
-  corpus, or output format would materially change the answer;
+  provider coverage, or output format would materially change the answer;
 - use `search` before factual, recent, comparative, dataset, benchmark,
   source-finding, or literature-review answers;
-- search both local BM25 and query-kit public providers by default with
-  `source="all"`;
-- use `fetch` only when a local BM25 search result needs more detail, not for
-  query-kit result IDs;
+- search public research providers through query-kit;
+- explain that local document ingestion/search is not implemented when a user
+  asks to search local/project documents;
 - cite source identifiers and explain evidence boundaries/uncertainty;
-- not claim semantic/vector retrieval, embeddings, or unsupported app features
-  were used.
+- not claim semantic/vector retrieval, embeddings, local document retrieval, or
+  unsupported app features were used.
 
 `build_agent_graph()` prepends this project prompt to every model call and
 strips incoming system messages so UI/session history cannot silently replace it.
@@ -128,21 +124,16 @@ Runtime logs include only the prompt version/hash, not the prompt text.
 The graph in `src/indic_research_agent/agent/graph.py` has two nodes:
 
 1. `llm`: calls the bound LiteLLM/LangChain chat model.
-2. `tools`: executes requested `search` or `fetch` tool calls.
+2. `tools`: executes requested public research `search` tool calls.
 
 The loop stops when there are no tool calls or `max_tool_calls` is reached
 (default: `6`).
 
 Important current behavior:
 
-- `search` can use `source="local"`, `source="research"`, or `source="all"`.
-- `fetch` only fetches local document IDs/chunks from `SearchService`; it is not
-  for query-kit result IDs.
-- The default Chainlit agent currently uses `create_seed_search_service()`, so
-  its local BM25 index is the built-in seed corpus. Database-backed document
-  ingestion exists in `DocumentService` and is exercised by smoke/integration
-  tests, but loading persisted documents into the default Chainlit graph is not
-  currently wired as a runtime feature.
+- `search` queries query-kit public research providers only.
+- There is no local/project document retrieval mode in the default app.
+- Optional Chainlit uploads are not processed into a searchable corpus.
 
 ### Chainlit integration
 
@@ -189,7 +180,7 @@ There are two PostgreSQL persistence namespaces:
 
 | Namespace | Tables | Purpose |
 | --- | --- | --- |
-| public app schema | `users`, `documents`, `document_chunks`, `queries`, `tool_calls`, `agent_responses`, `cache_metadata` | App-owned domain/audit/cache metadata. |
+| public app schema | `users`, `queries`, `tool_calls`, `agent_responses`, `cache_metadata` | App-owned audit/cache metadata. |
 | `chainlit` schema | `users`, `threads`, `steps`, `elements`, `feedbacks` | Chainlit data layer for authenticated users, chat history, steps, thread metadata, and feedback. |
 
 Why separate schemas? Chainlit requires a `users` table with a different shape
@@ -254,16 +245,15 @@ credentials.
 ├── scripts/
 │   ├── migrate.sh                    # Runs Alembic upgrade head
 │   ├── start_app.sh                  # Runs migrations then Chainlit
-│   └── smoke_query.py                # Deterministic end-to-end BM25/tool/cache smoke
+│   └── smoke_query.py                # Deterministic public search/tool/cache smoke
 ├── src/indic_research_agent/
 │   ├── agent/                        # LangGraph graph, prompt, model factory/adapters
 │   ├── controllers/                  # UI-facing controller boundary
 │   ├── db/                           # Async SQLAlchemy engine/session helpers
 │   ├── models/                       # SQLAlchemy ORM models
 │   ├── repositories/                 # Persistence repository classes
-│   ├── retrieval/                    # BM25 index and search contracts
 │   ├── services/                     # App orchestration and external service adapters
-│   ├── tools/                        # Search/fetch tools and schemas
+│   ├── tools/                        # Public search tool and schemas
 │   └── ui/                           # Chainlit adapter and stream renderer
 └── tests/
     ├── e2e/                          # Live/smoke end-to-end tests
@@ -351,7 +341,7 @@ It reads environment variables and `.env` with `extra="ignore"`.
 | `DATABASE_URL` | none | Accepted as fallback alias for app DB URL. Avoid relying on it for Chainlit; use `CHAINLIT_DATABASE_URL` explicitly. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis cache URL. |
 | `QUERY_KIT_PROVIDERS` | `semantic-scholar,semantic-scholar-web,pubmed,arxiv-web` | Comma-separated provider IDs. Supported values include `acl`, `arxiv`, `arxiv-web`, `pubmed`, `semantic-scholar`, `semantic-scholar-web`, `openreview`, and `all`. Default uses the measured fast/partial-safe provider set plus safe public-web fallbacks for Indic OCR queries. |
-| `QUERY_KIT_TIMEOUT_SECONDS` | `30` | Overall public-provider budget for query-kit search; the UI emits per-provider progress/timeout steps and continues with partial/local BM25 results on timeout. |
+| `QUERY_KIT_TIMEOUT_SECONDS` | `30` | Overall public-provider budget for query-kit search; the UI emits per-provider progress/timeout steps and continues with partial public results on timeout. |
 | `QUERY_CLI_USER_AGENT` | `indic-research-agent/0.1 (+https://github.com/neeraj1909/indic-research-agent)` | Project-specific User-Agent passed through query-kit for ordinary HTTP public-web providers such as `arxiv-web` and `semantic-scholar-web`. |
 | `BROWSER_COOKIE_JAR_ENABLED` | `true` | Enables the persistent browser-cookie jar service for authorized browser automation. When enabled without `BROWSER_CDP_ENDPOINT`, the jar can still be created but CDP sync is a no-op. |
 | `BROWSER_CDP_ENDPOINT` | none | Optional authorized Chrome/Chromium DevTools Protocol endpoint (`http://host:9222` or `ws://.../devtools/browser/...`). The app does not install or launch Chrome. |
@@ -578,11 +568,11 @@ REDIS_URL='redis://localhost:6379/0' \
 uv run alembic upgrade head
 APP_DATABASE_URL='postgresql+asyncpg://postgres:postgres@localhost:5432/indic_research_agent' \
 REDIS_URL='redis://localhost:6379/0' \
-uv run python scripts/smoke_query.py --question "How does BM25 retrieval support this agent?"
+uv run python scripts/smoke_query.py --question "Find public research on Hindi OCR."
 ```
 
 Expected smoke output is JSON with a non-empty `answer`, a `tool_call_count` of
-`2`, at least `2` persisted tool calls, and at least `2` Redis cache hits.
+`1`, at least `1` persisted tool call, and at least `1` Redis cache hit.
 
 ## Usage guide
 
@@ -622,7 +612,7 @@ The UI creates a response immediately, then shows progress steps such as:
 
 - request received;
 - LLM call;
-- search/fetch tool start/end;
+- search tool start/end;
 - final synthesis;
 - answer finalized;
 - completed or failed.
@@ -674,10 +664,9 @@ No separate type checker is configured in this repository.
 timeout 60 uv run pytest -m unit --no-cov
 ```
 
-Unit coverage includes BM25 behavior, tool schemas/tools, query-kit wrapper
-fallbacks, auth, chat history, controller delegation, stream event mapping,
-LangGraph streaming, Chainlit callback helpers, and the no-vector-dependency
-policy.
+Unit coverage includes tool schemas/tools, query-kit wrapper fallbacks, auth,
+chat history, controller delegation, stream event mapping, LangGraph streaming,
+Chainlit callback helpers, and the no-vector-dependency policy.
 
 ### Integration tests
 
@@ -692,7 +681,6 @@ uv run pytest -m integration
 
 Integration tests cover:
 
-- database-backed BM25 roundtrip;
 - Redis cache behavior;
 - repository roundtrip;
 - Chainlit schema migration isolation;
@@ -721,7 +709,7 @@ E2E coverage includes:
 - `/user` returning identifier `test`;
 - `/project/settings?language=en-US` showing `dataPersistence=true` and
   `threadResumable=true`;
-- deterministic smoke query through the BM25/tool/cache/persistence stack;
+- deterministic smoke query through the public search/tool/cache/persistence stack;
 - service-level streaming smoke.
 
 ### Full local validation loop
@@ -749,9 +737,9 @@ git diff --check
 - Formatting/linting: Ruff (`line-length = 88`, double quotes, import sorting,
   selected lint rules `E`, `F`, `I`, `UP`, `B`, `SIM`).
 - Keep Chainlit-specific imports in UI/adapter modules where possible.
-- Keep retrieval logic testable without an LLM.
-- Maintain BM25/keyword-first retrieval unless a future plan records evidence to
-  add vector/embedding infrastructure.
+- Keep public research search logic testable without an LLM.
+- Do not add local document retrieval unless a future ingestion/indexing PRP
+  implements a real project corpus first.
 
 ### Adding or modifying tools
 
@@ -1048,10 +1036,9 @@ currently documented in this repository.
 
 ### Slow answers
 
-The default prompt asks the agent to search both local BM25 and public research
-providers. Public provider calls can dominate latency. To narrow search, the LLM
-must choose or be prompted toward `source="local"`; there is not currently a UI
-setting for source selection.
+The default prompt asks the agent to search public research providers through
+query-kit. Public provider calls can dominate latency. Narrow the query,
+providers, or `since_year` when provider latency is high.
 
 ## Security notes
 
@@ -1070,7 +1057,7 @@ setting for source selection.
 - Uploaded files are not durably stored by a configured object storage provider,
   but users should still avoid uploading secrets or sensitive documents until a
   reviewed ingestion/storage policy exists.
-- The no-vector-dependency guard helps preserve the BM25-first retrieval policy.
+- The no-vector-dependency guard helps preserve the no-embedding/no-vector-search policy.
 
 ## Contributing
 
@@ -1085,8 +1072,8 @@ Suggested workflow:
 3. Run formatting/linting and the relevant test tiers.
 4. Keep Chainlit UI code thin; put orchestration in controllers/services/agent
    modules.
-5. Keep retrieval BM25/keyword-first unless a future PRP explicitly changes the
-   architecture.
+5. Do not add local document retrieval without an ingestion/indexing PRP that
+   creates a real project corpus first.
 6. Do not add vector/embedding dependencies without updating policy/tests.
 7. Open a PR with validation output and any migration/deployment notes.
 
