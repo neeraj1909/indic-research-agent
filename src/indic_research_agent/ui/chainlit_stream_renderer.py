@@ -38,7 +38,7 @@ class ChainlitStreamRenderer:
 
     def __init__(self, message: cl.Message) -> None:
         self._message = message
-        self._tool_steps: dict[str, cl.Step] = {}
+        self._status_step: cl.Step | None = None
         self._token_seen = False
         self.completed_answer: str | None = None
         self.failed = False
@@ -53,32 +53,14 @@ class ChainlitStreamRenderer:
             if not self._token_seen:
                 self._message.content = event.answer
             await self._message.update()
-            await self._send_step(
-                StepSpec(
-                    name="Completed",
-                    type="run",
-                    output=(
-                        f"Retrieved contexts: {len(event.retrieved_context)}; "
-                        f"tool calls: {event.tool_call_count}"
-                    ),
-                    tags=["agent", "complete"],
-                )
-            )
+            await self._clear_status()
             return
         if isinstance(event, AgentFailed):
             self.failed = True
             self._message.content = f"Request failed: {event.message}"
             self._message.is_error = True
             await self._message.update()
-            await self._send_step(
-                StepSpec(
-                    name="Request failed",
-                    type="run",
-                    output=event.message,
-                    is_error=True,
-                    tags=["agent", "error"],
-                )
-            )
+            await self._clear_status()
             return
         if isinstance(event, AgentToolStarted):
             await self._start_tool_step(event)
@@ -88,53 +70,70 @@ class ChainlitStreamRenderer:
             return
         spec = event_to_step_spec(event)
         if spec is not None:
-            await self._send_step(spec)
+            await self._update_status(spec)
 
     async def _start_tool_step(self, event: AgentToolStarted) -> None:
-        key = event.tool_call_id or event.name
-        step = cl.Step(
-            name=f"Tool: {event.name}",
-            type=_tool_step_type(event.name),
-            tags=["agent", "tool", event.name],
-            metadata={"tool_call_id": event.tool_call_id},
+        await self._update_status(
+            StepSpec(
+                name=f"Tool: {event.name}",
+                type=_tool_step_type(event.name),
+                input=event.args_summary,
+                output="Running…",
+                tags=["agent", "tool", event.name],
+                metadata={"tool_call_id": event.tool_call_id},
+            )
         )
-        step.input = event.args_summary
-        step.output = "Running…"
-        await step.send()
-        self._tool_steps[key] = step
 
     async def _finish_tool_step(self, event: AgentToolFinished) -> None:
-        key = event.tool_call_id or event.name
-        step = self._tool_steps.get(key)
         output = event.result_summary
         if event.latency_ms is not None:
-            output = f"{output}\n\nLatency: {event.latency_ms:.0f} ms"
-        if step is None:
-            await self._send_step(
-                StepSpec(
-                    name=f"Tool: {event.name}",
-                    type=_tool_step_type(event.name),
-                    input=str(event.arguments),
-                    output=output,
-                    tags=["agent", "tool", event.name],
-                    metadata={"tool_call_id": event.tool_call_id},
-                )
+            output = f"{output}; latency: {event.latency_ms:.0f} ms"
+        await self._update_status(
+            StepSpec(
+                name=f"Tool: {event.name}",
+                type=_tool_step_type(event.name),
+                input=str(event.arguments),
+                output=output,
+                tags=["agent", "tool", event.name],
+                metadata={"tool_call_id": event.tool_call_id},
             )
-            return
-        step.output = output
-        await step.update()
-
-    async def _send_step(self, spec: StepSpec) -> None:
-        step = cl.Step(
-            name=spec.name,
-            type=spec.type,
-            tags=spec.tags,
-            metadata=spec.metadata,
         )
-        step.input = spec.input
-        step.output = spec.output
-        step.is_error = spec.is_error
-        await step.send()
+
+    async def _update_status(self, spec: StepSpec) -> None:
+        metadata = {**(spec.metadata or {}), "ephemeral_status": True}
+        tags = _ephemeral_tags(spec.tags)
+        name = _one_line_status(spec.name, max_chars=80) or "Working"
+        input_value = _one_line_status(spec.input)
+        output = _one_line_status(spec.output)
+
+        if self._status_step is None:
+            self._status_step = cl.Step(
+                name=name,
+                type=spec.type,
+                tags=tags,
+                metadata=metadata,
+            )
+            self._status_step.input = input_value
+            self._status_step.output = output
+            self._status_step.is_error = spec.is_error
+            await self._status_step.send()
+            return
+
+        self._status_step.name = name
+        self._status_step.type = spec.type
+        self._status_step.tags = tags
+        self._status_step.metadata = metadata
+        self._status_step.input = input_value
+        self._status_step.output = output
+        self._status_step.is_error = spec.is_error
+        await self._status_step.update()
+
+    async def _clear_status(self) -> None:
+        if self._status_step is None:
+            return
+        status_step = self._status_step
+        self._status_step = None
+        await status_step.remove()
 
 
 def event_to_step_spec(event: AgentStreamEvent) -> StepSpec | None:
@@ -165,6 +164,25 @@ def event_to_step_spec(event: AgentStreamEvent) -> StepSpec | None:
 
 def _tool_step_type(tool_name: str) -> ChainlitStepType:
     return "retrieval" if tool_name == "search" else "tool"
+
+
+def _ephemeral_tags(tags: list[str] | None) -> list[str]:
+    values = list(tags or [])
+    for tag in ("agent", "progress", "ephemeral"):
+        if tag not in values:
+            values.append(tag)
+    return values
+
+
+def _one_line_status(text: str, *, max_chars: int = 140) -> str:
+    if max_chars <= 0:
+        return ""
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    if max_chars == 1:
+        return "…"
+    return f"{normalized[: max_chars - 1].rstrip()}…"
 
 
 def _safe_step_type(step_type: str) -> ChainlitStepType:

@@ -36,8 +36,8 @@ The application answers research questions by combining:
 1. public research search through `query-kit` providers;
 2. a LangGraph tool-calling loop with a typed `search` tool;
 3. a LiteLLM-compatible chat model for synthesis;
-4. a Chainlit UI with local password auth, resumable chat history, progress
-   steps, and answer streaming/fallback updates.
+4. a Chainlit UI with local password auth, resumable chat history, an ephemeral
+   single-line progress status row, and answer streaming/fallback updates.
 
 ### Core use cases
 
@@ -55,7 +55,7 @@ The application answers research questions by combining:
 | Web UI | Chainlit app in `src/indic_research_agent/ui/chainlit_app.py`. |
 | Authentication | Chainlit password auth via `AuthService`; local/e2e user defaults to `test` / `test1234`. |
 | Chat history | Chainlit SQLAlchemy data layer backed by PostgreSQL schema `chainlit`; `@cl.on_chat_resume` restores runtime state. |
-| Streaming/progress | Agent emits framework-neutral events; Chainlit renders progress `Step`s and streams answer text when chunks are available. |
+| Streaming/progress | Agent emits framework-neutral events; Chainlit renders one ephemeral progress `Step` status row that updates in place, clears it on completion/failure, and streams answer text when chunks are available. |
 | Public research search | `QueryKitService` wraps `query-kit` providers and is the only retrieval mode exposed to the agent/UI. |
 | Local document search | Not implemented in this app version; uploads are not ingested or indexed into a project corpus. |
 | Persistence/audit | App tables store users, queries, tool calls, responses, and cache metadata. Legacy document/chunk tables may exist from earlier revisions but are not used for runtime retrieval. |
@@ -167,12 +167,15 @@ Streaming is split into two layers:
    - `AgentFailed`
 
 2. **UI layer:** `ChainlitStreamRenderer` converts those events into Chainlit
-   `Message` and `Step` updates.
+   `Message` updates plus one ephemeral Chainlit `Step` used as the live status
+   row.
 
-The UI always shows progress for request receipt, LLM calls, tool start/end,
-final synthesis, completion, and errors. Answer text is streamed when the
-selected LangGraph/model path yields message chunks; otherwise Chainlit still
-shows progress and updates the final message from `AgentCompleted.answer`.
+The UI shows a single progress status row for request receipt, LLM calls, tool
+start/end, and final synthesis. Each new progress event updates that same row
+instead of adding another line, and the row is removed automatically on
+completion or failure. Answer text is streamed when the selected
+LangGraph/model path yields message chunks; otherwise Chainlit still updates the
+final message from `AgentCompleted.answer`.
 
 ### Persistence and session handling
 
@@ -608,14 +611,12 @@ Translate and analyze this Tamil passage: ...
 Create a research brief on Indic language evaluation benchmarks.
 ```
 
-The UI creates a response immediately, then shows progress steps such as:
-
-- request received;
-- LLM call;
-- search tool start/end;
-- final synthesis;
-- answer finalized;
-- completed or failed.
+The UI creates a response immediately, then shows one ephemeral progress status
+row that updates in place as the run moves through request receipt, LLM calls,
+search tool start/end, and final synthesis. The status row is cleared when the
+run completes or fails, so completed chats should not retain transient progress
+rows such as `Used LLM call` or `Used Completed`. Use app logs and Phoenix spans
+for detailed provider/tool debugging after completion.
 
 If the model/tool path emits answer chunks, the response streams into the
 message. If not, the final answer is still displayed once the run completes.
@@ -637,8 +638,9 @@ With auth and the Chainlit data layer enabled:
 - Optional uploads are allowed by Chainlit config for text, Markdown, PDF, JSON,
   and CSV. No custom upload-processing pipeline is currently implemented in the
   agent code.
-- Output: Chainlit assistant message plus progress/tool steps. App audit rows
-  are written when UI persistence is enabled.
+- Output: Chainlit assistant message plus an ephemeral progress/tool status row
+  while a run is active. App audit rows are written when UI persistence is
+  enabled.
 
 ## Testing and validation
 
@@ -1011,7 +1013,8 @@ REDIS_URL='redis://localhost:6379/0' uv run pytest tests/integration/test_redis_
 
 ### No progress or no streaming tokens in the UI
 
-Progress steps should appear even when token-level streaming is unavailable. If
+A single ephemeral progress status row should appear even when token-level
+streaming is unavailable, and it should disappear after completion/failure. If
 no progress appears:
 
 - confirm `.chainlit/config.toml` has `cot = "full"`;
@@ -1025,7 +1028,9 @@ uv run pytest tests/unit/services/test_agent_service_streaming.py tests/e2e/test
 
 If progress appears but tokens do not stream, the selected model/adapter may be
 returning a completed `AIMessage` rather than incremental chunks. The UI should
-still update with the final answer.
+still update with the final answer. If multiple `Used ...` progress rows stack
+or remain after completion, debug `ChainlitStreamRenderer` before changing graph
+or provider logic.
 
 ### Query-kit provider failures
 

@@ -2,10 +2,10 @@
 
 ## Active PRP
 
-- Plan file: `/home/neeraj/prp-plans/indic-research-agent/2026-05-08-query-kit-adapter-verification-observability-plan.md`
+- Plan file: `/home/neeraj/prp-plans/indic-research-agent/2026-05-15-chainlit-single-line-progress-status-plan.md`
 - When asked to continue implementation, re-open the plan first and execute the earliest incomplete checkbox in `## Implementation Blueprint`.
 - After each meaningful work chunk, update the plan's Status Snapshot, checklist state, blockers, and `## What else remains?`.
-- Do not run whole-app Docker redeploy, Chainlit browser e2e, or Phoenix e2e for this PRP until the plan's standalone query-kit isolation gates pass outside Docker.
+- For this UI-status PRP, keep Chainlit as a thin UI adapter, use `cdp` for browser evidence, and run Docker/browser validation only after local renderer/unit gates pass.
 
 ## Architecture Constraints
 
