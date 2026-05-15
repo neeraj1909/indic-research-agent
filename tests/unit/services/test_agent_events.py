@@ -16,17 +16,17 @@ pytestmark = pytest.mark.unit
 def test_agent_events_are_framework_neutral_and_serializable() -> None:
     event = AgentToolStarted(
         name="search",
-        args_summary="query=bm25",
+        args_summary="query=Hindi OCR",
         tool_call_id="call-1",
-        arguments={"query": "bm25"},
+        arguments={"query": "Hindi OCR"},
     )
 
     assert event_to_dict(event) == {
         "event": "AgentToolStarted",
         "name": "search",
-        "args_summary": "query=bm25",
+        "args_summary": "query=Hindi OCR",
         "tool_call_id": "call-1",
-        "arguments": {"query": "bm25"},
+        "arguments": {"query": "Hindi OCR"},
     }
 
 
@@ -46,14 +46,14 @@ def test_agent_completed_carries_answer_context_and_tool_count() -> None:
 
 def test_agent_tool_finished_can_carry_persistence_metadata() -> None:
     event = AgentToolFinished(
-        name="fetch",
+        name="search",
         latency_ms=10.5,
-        result_summary="document fetched",
-        arguments={"document_id": "doc"},
-        result_metadata={"document_id": "doc", "content_chars": 20},
+        result_summary="1 public result",
+        arguments={"query": "Hindi OCR"},
+        result_metadata={"result_count": 1, "document_ids": ["query-kit:1"]},
     )
 
     assert event_to_dict(event)["result_metadata"] == {
-        "document_id": "doc",
-        "content_chars": 20,
+        "result_count": 1,
+        "document_ids": ["query-kit:1"],
     }

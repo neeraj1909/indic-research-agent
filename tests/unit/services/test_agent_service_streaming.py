@@ -28,8 +28,8 @@ class FakeStreamingGraph:
                 "event": "agent.tool.start",
                 "name": "search",
                 "tool_call_id": "call-1",
-                "args": {"query": "bm25"},
-                "args_summary": "query=bm25",
+                "args": {"query": "Hindi OCR"},
+                "args_summary": "query=Hindi OCR",
             },
         )
         yield (
@@ -39,7 +39,7 @@ class FakeStreamingGraph:
                 "name": "search",
                 "tool_call_id": "call-1",
                 "latency_ms": 12.5,
-                "result_summary": "1 result(s): BM25",
+                "result_summary": "1 result(s): Hindi OCR source",
                 "result_metadata": {"result_count": 1},
             },
         )
@@ -52,16 +52,16 @@ class FakeStreamingGraph:
                 "step_type": "retrieval",
             },
         )
-        yield ("messages", (AIMessage(content="BM25 "), {}))
+        yield ("messages", (AIMessage(content="Hindi OCR "), {}))
         yield ("messages", (AIMessage(content="works."), {}))
         yield (
             "updates",
             {
                 "llm": {
-                    "messages": [AIMessage(content="BM25 works.")],
+                    "messages": [AIMessage(content="Hindi OCR works.")],
                     "retrieved_context": ["ctx"],
                     "tool_call_count": 1,
-                    "final_answer": "BM25 works.",
+                    "final_answer": "Hindi OCR works.",
                 }
             },
         )
@@ -92,16 +92,16 @@ async def test_stream_answer_emits_ordered_progress_tokens_and_completion() -> N
         for event in events
     )
     finished = next(event for event in events if isinstance(event, AgentToolFinished))
-    assert finished.arguments == {"query": "bm25"}
+    assert finished.arguments == {"query": "Hindi OCR"}
     assert [
         getattr(event, "text", None) for event in events if hasattr(event, "text")
     ] == [
-        "BM25 ",
+        "Hindi OCR ",
         "works.",
     ]
     completed = events[-1]
     assert isinstance(completed, AgentCompleted)
-    assert completed.answer == "BM25 works."
+    assert completed.answer == "Hindi OCR works."
     assert completed.retrieved_context == ["ctx"]
     assert completed.tool_call_count == 1
     assert [message.content for message in graph.seen_input["messages"]] == [
@@ -116,5 +116,5 @@ async def test_answer_collects_final_completion_from_stream() -> None:
 
     answer = await service.answer("How?")
 
-    assert answer.answer == "BM25 works."
+    assert answer.answer == "Hindi OCR works."
     assert answer.tool_call_count == 1

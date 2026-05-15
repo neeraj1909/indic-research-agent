@@ -24,8 +24,8 @@ class SmokeStreamingGraph:
                 "event": "agent.tool.start",
                 "name": "search",
                 "tool_call_id": "search-1",
-                "args": {"query": "bm25"},
-                "args_summary": "query=bm25",
+                "args": {"query": "Hindi OCR"},
+                "args_summary": "query=Hindi OCR",
             },
         )
         yield (
@@ -35,7 +35,7 @@ class SmokeStreamingGraph:
                 "name": "search",
                 "tool_call_id": "search-1",
                 "latency_ms": 1,
-                "result_summary": "1 result(s): BM25",
+                "result_summary": "1 result(s): Hindi OCR source",
             },
         )
         yield ("messages", (AIMessage(content="streamed "), {}))
@@ -57,7 +57,7 @@ class SmokeStreamingGraph:
 async def test_service_stream_smoke_has_progress_tokens_and_completion() -> None:
     service = AgentService(SmokeStreamingGraph())
 
-    events = [event async for event in service.stream_answer("Explain BM25")]
+    events = [event async for event in service.stream_answer("Explain Hindi OCR")]
 
     assert any(isinstance(event, AgentProgress) for event in events)
     assert any(isinstance(event, AgentToolStarted) for event in events)

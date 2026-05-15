@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from indic_research_agent.agent.graph import build_agent_graph
 from indic_research_agent.agent.llm import create_chat_model
 from indic_research_agent.db.session import create_session_factory, session_scope
-from indic_research_agent.retrieval import create_seed_search_service
 from indic_research_agent.services.agent_events import (
     AgentCompleted,
     AgentFailed,
@@ -36,7 +35,6 @@ from indic_research_agent.services.phoenix_tracing import (
 )
 from indic_research_agent.services.query_service import QueryService
 from indic_research_agent.services.querykit_service import QueryKitService
-from indic_research_agent.tools.fetch import FetchTool
 from indic_research_agent.tools.search import SearchTool
 
 logger = logging.getLogger(__name__)
@@ -124,7 +122,7 @@ class AgentService:
                     session_id=session_id,
                     user_identifier=user_identifier,
                     metadata={"persist_queries": should_persist},
-                    tags=["chainlit", "agent", "bm25-first"],
+                    tags=["chainlit", "agent", "public-research"],
                 ),
                 "agent.history_turns": len(history_list),
                 "agent.request_id": request_id,
@@ -304,13 +302,10 @@ class AgentService:
 
 
 def create_default_graph():
-    search_service = create_seed_search_service()
-    search_tool = SearchTool(search_service, QueryKitService())
-    fetch_tool = FetchTool(search_service)
+    search_tool = SearchTool(QueryKitService())
     return build_agent_graph(
         create_chat_model(),
         search_tool=search_tool,
-        fetch_tool=fetch_tool,
     )
 
 

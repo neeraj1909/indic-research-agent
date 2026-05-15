@@ -5,8 +5,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from indic_research_agent.agent.graph import _with_system_prompt, build_agent_graph
 from indic_research_agent.agent.prompts import SYSTEM_PROMPT
-from indic_research_agent.retrieval import SearchService
-from indic_research_agent.tools.fetch import FetchTool
 from indic_research_agent.tools.search import SearchTool
 
 pytestmark = pytest.mark.unit
@@ -28,6 +26,11 @@ class CapturingModel:
         return AIMessage(content="Captured prompt.")
 
 
+class EmptyQueryKitService:
+    async def search(self, query, *, providers=None, limit=5, since_year=None):
+        return []
+
+
 def test_system_prompt_is_indic_research_specific_and_tool_grounded() -> None:
     prompt = SYSTEM_PROMPT
 
@@ -39,10 +42,10 @@ def test_system_prompt_is_indic_research_specific_and_tool_grounded() -> None:
         "Marathi legal text classification",
         "Tamil passage",
         "Indic language evaluation benchmarks",
-        'source="all"',
-        "fetch",
-        "source identifiers",
-        "BM25",
+        "public research",
+        "query-kit",
+        "local document ingestion",
+        "local document search are not implemented",
         "provider-friendly keyword",
         "citation_id",
         "inline citation",
@@ -50,6 +53,15 @@ def test_system_prompt_is_indic_research_specific_and_tool_grounded() -> None:
         "No retrieved sources",
     ]:
         assert marker in prompt
+
+    removed_markers = [
+        'source="' + "all" + '"',
+        'source="' + "local" + '"',
+        "local keyword corpus",
+        "fe" + "tch",
+    ]
+    for removed_marker in removed_markers:
+        assert removed_marker not in prompt
 
     assert "do not use embeddings" in prompt.lower()
     assert "uncertainty" in prompt.lower()
@@ -92,8 +104,7 @@ async def test_graph_passes_project_prompt_for_representative_indic_queries(
     model = CapturingModel()
     graph = build_agent_graph(
         model,
-        search_tool=SearchTool(SearchService()),
-        fetch_tool=FetchTool(SearchService()),
+        search_tool=SearchTool(EmptyQueryKitService()),
     )
 
     result = await graph.ainvoke(
@@ -107,6 +118,7 @@ async def test_graph_passes_project_prompt_for_representative_indic_queries(
 
     assert result["final_answer"] == "Captured prompt."
     assert model.bound_tools is not None
+    assert [tool.name for tool in model.bound_tools] == ["search"]
     assert model.calls
     first_call = model.calls[0]
     assert isinstance(first_call[0], SystemMessage)

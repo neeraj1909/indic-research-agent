@@ -36,7 +36,7 @@ def test_stream_parser_collects_tool_call_chunks() -> None:
             ),
             (
                 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
-                '"function":{"arguments":"{\\"query\\":\\"bm25\\","}}]}}]}'
+                '"function":{"arguments":"{\\"query\\":\\"Hindi OCR\\","}}]}}]}'
             ),
             (
                 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
@@ -50,7 +50,7 @@ def test_stream_parser_collects_tool_call_chunks() -> None:
     assert message.tool_calls == [
         {
             "name": "search",
-            "args": {"query": "bm25", "top_k": 5},
+            "args": {"query": "Hindi OCR", "top_k": 5},
             "id": "call-search",
             "type": "tool_call",
         }

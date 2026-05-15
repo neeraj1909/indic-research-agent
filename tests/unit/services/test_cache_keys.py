@@ -16,12 +16,12 @@ def test_cache_key_is_stable_for_equivalent_payloads() -> None:
 
 
 def test_cache_key_namespace_changes_key() -> None:
-    payload = {"query": "bm25"}
+    payload = {"query": "Hindi OCR"}
 
     assert build_cache_key("one", payload) != build_cache_key("two", payload)
 
 
 def test_cache_key_has_bounded_length() -> None:
-    key = build_cache_key("tool.search", {"query": "bm25" * 100})
+    key = build_cache_key("tool.search", {"query": "Hindi OCR" * 100})
 
     assert len(key) < 100

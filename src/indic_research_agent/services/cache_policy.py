@@ -11,11 +11,10 @@ class CachePolicy:
         default_factory=lambda: {
             "query-kit.search": 900,
             "tool.search": 300,
-            "tool.fetch": 900,
             "agent.response": 300,
         }
     )
-    document_dependent_namespaces: tuple[str, ...] = ("tool.search", "tool.fetch")
+    document_dependent_namespaces: tuple[str, ...] = ()
 
     def ttl_for(self, namespace: str) -> int:
         return self.ttl_by_namespace.get(namespace, 300)

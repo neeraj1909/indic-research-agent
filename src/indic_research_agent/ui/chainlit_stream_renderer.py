@@ -164,7 +164,7 @@ def event_to_step_spec(event: AgentStreamEvent) -> StepSpec | None:
 
 
 def _tool_step_type(tool_name: str) -> ChainlitStepType:
-    return "retrieval" if tool_name in {"search", "fetch"} else "tool"
+    return "retrieval" if tool_name == "search" else "tool"
 
 
 def _safe_step_type(step_type: str) -> ChainlitStepType:

@@ -4,8 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from indic_research_agent.agent.graph import build_agent_graph
-from indic_research_agent.retrieval import DocumentChunk, SearchService
-from indic_research_agent.tools.fetch import FetchTool
+from indic_research_agent.services.search_results import SearchResult
 from indic_research_agent.tools.search import SearchTool
 
 pytestmark = pytest.mark.unit
@@ -27,34 +26,36 @@ class StreamingFakeModel:
                     {
                         "name": "search",
                         "args": {
-                            "query": "bm25 keyword retrieval",
+                            "query": "Hindi OCR public research",
                             "top_k": 1,
-                            "source": "local",
                         },
                         "id": "call-search",
                     }
                 ],
             )
-        return AIMessage(content="BM25 works with streaming progress.")
+        return AIMessage(content="Public research works with streaming progress.")
+
+
+class FakeQueryKitService:
+    async def search(self, query, *, providers=None, limit=5, since_year=None):
+        return [
+            SearchResult(
+                document_id="query-kit:research-1",
+                chunk_id="abstract",
+                score=1.0,
+                title="Query-kit research result",
+                source="https://example.test/research",
+                snippet="Public research result from query-kit.",
+                metadata={"provider": "fake"},
+            )
+        ][:limit]
 
 
 @pytest.mark.asyncio
 async def test_graph_astream_emits_custom_progress_events() -> None:
-    search_service = SearchService(
-        [
-            DocumentChunk(
-                document_id="bm25",
-                chunk_id="bm25-1",
-                title="BM25",
-                source="test://bm25",
-                text="BM25 keyword retrieval ranks chunks without embeddings.",
-            )
-        ]
-    )
     graph = build_agent_graph(
         StreamingFakeModel(),
-        search_tool=SearchTool(search_service),
-        fetch_tool=FetchTool(search_service),
+        search_tool=SearchTool(FakeQueryKitService()),
     )
 
     custom_events = []
@@ -78,4 +79,4 @@ async def test_graph_astream_emits_custom_progress_events() -> None:
     assert "agent.tool.start" in event_names
     assert "agent.tool.end" in event_names
     assert "agent.answer.finalized" in event_names
-    assert final_answer == "BM25 works with streaming progress."
+    assert final_answer == "Public research works with streaming progress."

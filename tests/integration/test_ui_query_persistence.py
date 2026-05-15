@@ -24,8 +24,8 @@ class PersistingFakeGraph:
                 "event": "agent.tool.start",
                 "name": "search",
                 "tool_call_id": "call-1",
-                "args": {"query": "bm25"},
-                "args_summary": "query=bm25",
+                "args": {"query": "Hindi OCR"},
+                "args_summary": "query=Hindi OCR",
             },
         )
         yield (
@@ -35,7 +35,7 @@ class PersistingFakeGraph:
                 "name": "search",
                 "tool_call_id": "call-1",
                 "latency_ms": 4.0,
-                "result_summary": "1 result(s): BM25",
+                "result_summary": "1 result(s): Hindi OCR source",
                 "result_metadata": {"result_count": 1, "document_ids": ["doc-1"]},
             },
         )
@@ -43,10 +43,10 @@ class PersistingFakeGraph:
             "updates",
             {
                 "llm": {
-                    "messages": [AIMessage(content="BM25 answer")],
+                    "messages": [AIMessage(content="Hindi OCR answer")],
                     "retrieved_context": ["context"],
                     "tool_call_count": 1,
-                    "final_answer": "BM25 answer",
+                    "final_answer": "Hindi OCR answer",
                 }
             },
         )
@@ -85,13 +85,13 @@ async def test_ui_style_agent_stream_records_query_tool_and_response(
     events = [
         event
         async for event in service.stream_answer(
-            "How does BM25 help?",
+            "How does Hindi OCR help?",
             session_id="chainlit-thread-1",
             user_identifier="test",
         )
     ]
 
-    assert events[-1].answer == "BM25 answer"
+    assert events[-1].answer == "Hindi OCR answer"
     async with session_factory() as session:
         queries = (await session.execute(select(UserQuery))).scalars().all()
         tool_calls = (await session.execute(select(ToolCall))).scalars().all()
@@ -99,10 +99,10 @@ async def test_ui_style_agent_stream_records_query_tool_and_response(
 
     assert len(queries) == 1
     assert queries[0].session_id == "chainlit-thread-1"
-    assert queries[0].text == "How does BM25 help?"
+    assert queries[0].text == "How does Hindi OCR help?"
     assert len(tool_calls) == 1
     assert tool_calls[0].tool_name == "search"
-    assert tool_calls[0].arguments_json == {"query": "bm25"}
+    assert tool_calls[0].arguments_json == {"query": "Hindi OCR"}
     assert tool_calls[0].result_summary_json["result_count"] == 1
     assert len(responses) == 1
-    assert responses[0].answer == "BM25 answer"
+    assert responses[0].answer == "Hindi OCR answer"

@@ -32,8 +32,7 @@ from indic_research_agent.services.phoenix_tracing import (
     tool_attributes,
     trace_span,
 )
-from indic_research_agent.tools.fetch import FetchTool
-from indic_research_agent.tools.schemas import FetchToolInput, SearchToolInput
+from indic_research_agent.tools.schemas import SearchToolInput
 from indic_research_agent.tools.search import SearchTool
 
 logger = logging.getLogger(__name__)
@@ -43,13 +42,12 @@ def build_agent_graph(
     model: Any,
     *,
     search_tool: SearchTool,
-    fetch_tool: FetchTool,
     max_tool_calls: int = 6,
     system_prompt: str = SYSTEM_PROMPT,
 ):
     """Build the LangGraph tool-calling loop."""
 
-    langchain_tools = _create_langchain_tools(search_tool, fetch_tool)
+    langchain_tools = _create_langchain_tools(search_tool)
     system_prompt_version = (
         PROMPT_VERSION if system_prompt == SYSTEM_PROMPT else "custom"
     )
@@ -167,20 +165,15 @@ def build_agent_graph(
             )
             with trace_span(
                 f"tool.{tool_name}",
-                kind="RETRIEVER" if tool_name in {"search", "fetch"} else "TOOL",
+                kind="RETRIEVER" if tool_name == "search" else "TOOL",
                 input_value=tool_args,
                 attributes=tool_attributes(name=tool_name, parameters=tool_args),
             ) as tool_span:
-                if tool_name == "search":
-                    result = await search_tool.run(
-                        SearchToolInput.model_validate(tool_args)
-                    )
-                elif tool_name == "fetch":
-                    result = await fetch_tool.run(
-                        FetchToolInput.model_validate(tool_args)
-                    )
-                else:
+                if tool_name != "search":
                     raise ValueError(f"unknown tool: {tool_name}")
+                result = await search_tool.run(
+                    SearchToolInput.model_validate(tool_args)
+                )
                 tool_result_metadata = _tool_result_metadata(result)
                 set_span_attributes(tool_span, _tool_result_attributes(result))
                 set_span_output(
@@ -240,42 +233,24 @@ def build_agent_graph(
     return graph.compile()
 
 
-def _create_langchain_tools(search_tool: SearchTool, fetch_tool: FetchTool):
+def _create_langchain_tools(search_tool: SearchTool):
     async def search(
         query: str,
         top_k: int = 5,
-        source: str = "all",
         providers: list[str] | None = None,
         since_year: int | None = None,
     ) -> list[dict[str, object]]:
-        """Search local BM25 chunks and public research providers through query-kit."""
+        """Search public research providers through query-kit."""
 
         results = await search_tool.run(
             SearchToolInput(
                 query=query,
                 top_k=top_k,
-                source=source,
                 providers=providers,
                 since_year=since_year,
             )
         )
         return [result.model_dump() for result in results]
-
-    async def fetch(
-        document_id: str,
-        chunk_id: str | None = None,
-        max_chars: int = 8000,
-    ) -> dict[str, object]:
-        """Fetch a bounded local document chunk by document and chunk id."""
-
-        result = await fetch_tool.run(
-            FetchToolInput(
-                document_id=document_id,
-                chunk_id=chunk_id,
-                max_chars=max_chars,
-            )
-        )
-        return result.model_dump()
 
     return [
         StructuredTool.from_function(
@@ -283,13 +258,7 @@ def _create_langchain_tools(search_tool: SearchTool, fetch_tool: FetchTool):
             name="search",
             description=search.__doc__ or "",
             args_schema=SearchToolInput,
-        ),
-        StructuredTool.from_function(
-            coroutine=fetch,
-            name="fetch",
-            description=fetch.__doc__ or "",
-            args_schema=FetchToolInput,
-        ),
+        )
     ]
 
 
@@ -428,9 +397,6 @@ def _summarize_tool_result(result: Any) -> str:
             return "0 results"
         titles = [str(getattr(item, "title", "untitled")) for item in result[:3]]
         return f"{len(result)} result(s): " + "; ".join(titles)
-    content = getattr(result, "content", None)
-    if isinstance(content, str):
-        return f"{len(content)} character(s) fetched"
     return "tool completed"
 
 
@@ -450,9 +416,6 @@ def _tool_result_metadata(result: Any) -> dict[str, Any]:
         value = getattr(result, key, None)
         if value is not None:
             metadata[key] = str(value)
-    content = getattr(result, "content", None)
-    if isinstance(content, str):
-        metadata["content_chars"] = len(content)
     return metadata
 
 
@@ -469,8 +432,6 @@ def _tool_result_attributes(result: Any) -> dict[str, Any]:
         attrs["tool.document_id"] = metadata["document_id"]
     if "chunk_id" in metadata:
         attrs["tool.chunk_id"] = metadata["chunk_id"]
-    if "content_chars" in metadata:
-        attrs["tool.content_chars"] = metadata["content_chars"]
     return attrs
 
 

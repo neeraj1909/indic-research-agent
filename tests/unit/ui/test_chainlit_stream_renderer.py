@@ -11,7 +11,7 @@ pytestmark = pytest.mark.unit
 def test_run_started_maps_to_request_step() -> None:
     spec = event_to_step_spec(
         AgentRunStarted(
-            question="What is BM25?",
+            question="What is Hindi OCR?",
             session_id="thread-1",
             user_identifier="test",
         )
@@ -20,7 +20,7 @@ def test_run_started_maps_to_request_step() -> None:
     assert spec is not None
     assert spec.name == "Request received"
     assert spec.type == "run"
-    assert spec.input == "What is BM25?"
+    assert spec.input == "What is Hindi OCR?"
     assert "thread-1" in spec.output
     assert "test" in spec.output
 

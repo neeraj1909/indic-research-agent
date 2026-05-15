@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
-from indic_research_agent.retrieval import DocumentChunk, SearchResult, SearchService
+from indic_research_agent.services.search_results import SearchResult
 from indic_research_agent.tools.schemas import SearchToolInput
 from indic_research_agent.tools.search import SearchTool
 
@@ -54,36 +55,21 @@ class FailingQueryKitService:
         raise TimeoutError("public providers timed out")
 
 
-@pytest.mark.asyncio
-async def test_search_tool_returns_local_bm25_results() -> None:
-    tool = SearchTool(
-        SearchService(
-            [
-                DocumentChunk(
-                    document_id="bm25",
-                    chunk_id="bm25-1",
-                    text="BM25 keyword retrieval without vector embeddings",
-                    title="BM25",
-                )
-            ]
-        )
-    )
+def test_search_tool_input_rejects_removed_local_source_mode() -> None:
+    assert "source" not in SearchToolInput.model_fields
 
-    results = await tool.run(SearchToolInput(query="keyword retrieval", source="local"))
-
-    assert results[0].document_id == "bm25"
-    assert "keyword retrieval" in results[0].snippet
+    with pytest.raises(ValidationError):
+        SearchToolInput(query="keyword retrieval", **{"source": "local"})
 
 
 @pytest.mark.asyncio
-async def test_search_tool_can_include_querykit_results() -> None:
+async def test_search_tool_returns_querykit_results() -> None:
     querykit_service = FakeQueryKitService()
-    tool = SearchTool(SearchService(), querykit_service)
+    tool = SearchTool(querykit_service)
 
     results = await tool.run(
         SearchToolInput(
             query="xai nlp",
-            source="research",
             providers=["arxiv"],
             since_year=2024,
         )
@@ -99,14 +85,13 @@ async def test_search_tool_can_include_querykit_results() -> None:
 @pytest.mark.asyncio
 async def test_search_tool_retries_public_search_with_provider_friendly_query() -> None:
     querykit_service = EmptyThenFallbackQueryKitService()
-    tool = SearchTool(SearchService(), querykit_service)
+    tool = SearchTool(querykit_service)
 
     results = await tool.run(
         SearchToolInput(
             query=(
                 "Find one recent source on Hindi OCR datasets and answer in two bullets"
             ),
-            source="research",
             providers=[
                 "semantic-scholar",
                 "semantic-scholar-web",
@@ -125,21 +110,9 @@ async def test_search_tool_retries_public_search_with_provider_friendly_query() 
 
 
 @pytest.mark.asyncio
-async def test_search_tool_continues_with_local_results_when_querykit_fails() -> None:
-    tool = SearchTool(
-        SearchService(
-            [
-                DocumentChunk(
-                    document_id="bm25",
-                    chunk_id="bm25-1",
-                    text="Hindi OCR benchmark dataset for Devanagari documents",
-                    title="Hindi OCR",
-                )
-            ]
-        ),
-        FailingQueryKitService(),
-    )
+async def test_search_tool_returns_no_results_when_querykit_fails() -> None:
+    tool = SearchTool(FailingQueryKitService())
 
-    results = await tool.run(SearchToolInput(query="Hindi OCR", source="all"))
+    results = await tool.run(SearchToolInput(query="Hindi OCR"))
 
-    assert [result.document_id for result in results] == ["bm25"]
+    assert results == []

@@ -1,32 +1,30 @@
-"""Search tool."""
+"""Public research search tool."""
 
 from __future__ import annotations
 
 import logging
 import time
 
-from indic_research_agent.retrieval import SearchResult, SearchService
 from indic_research_agent.services.cache_service import CacheService
 from indic_research_agent.services.phoenix_tracing import set_span_output, trace_span
 from indic_research_agent.services.progress_events import emit_agent_progress
 from indic_research_agent.services.querykit_service import QueryKitService
+from indic_research_agent.services.search_results import SearchResult
 from indic_research_agent.tools.schemas import SearchToolInput, ToolSearchResult
 
 logger = logging.getLogger(__name__)
 
 
 class SearchTool:
-    """Search local BM25 chunks and public research providers."""
+    """Search public research providers through query-kit."""
 
     def __init__(
         self,
-        search_service: SearchService,
         querykit_service: QueryKitService | None = None,
         cache_service: CacheService | None = None,
         cache_ttl_seconds: int = 300,
     ) -> None:
-        self._search_service = search_service
-        self._querykit_service = querykit_service
+        self._querykit_service = querykit_service or QueryKitService()
         self._cache_service = cache_service
         self._cache_ttl_seconds = cache_ttl_seconds
 
@@ -51,138 +49,94 @@ class SearchTool:
             detail=search_summary,
             step_type="retrieval",
         )
-        results: list[SearchResult] = []
-        if input_data.source in {"local", "all"}:
-            start = time.perf_counter()
-            emit_agent_progress(
-                label="Search: local BM25",
-                detail=(
-                    f"Running local keyword retrieval for {_quote(input_data.query)}."
-                ),
-                step_type="retrieval",
-            )
+        start = time.perf_counter()
+        provider_detail = (
+            ",".join(input_data.providers)
+            if input_data.providers
+            else "configured providers"
+        )
+        emit_agent_progress(
+            label="Search: public research",
+            detail=(
+                f"Running query-kit for {_quote(input_data.query)} "
+                f"against {provider_detail}."
+            ),
+            step_type="retrieval",
+        )
+        try:
             with trace_span(
-                "search.local_bm25",
+                "search.query_kit",
                 kind="RETRIEVER",
-                input_value={"query": input_data.query, "top_k": input_data.top_k},
-                attributes={"retrieval.source": "local"},
-            ) as local_span:
-                local_results = self._search_service.search(
-                    input_data.query, top_k=input_data.top_k
+                input_value={
+                    "query": input_data.query,
+                    "providers": input_data.providers,
+                    "limit": input_data.top_k,
+                    "since_year": input_data.since_year,
+                },
+                attributes={"retrieval.source": "query-kit"},
+            ) as research_span:
+                results = await self._querykit_service.search(
+                    input_data.query,
+                    providers=input_data.providers,
+                    limit=input_data.top_k,
+                    since_year=input_data.since_year,
                 )
+                if not results:
+                    for fallback_query in _provider_friendly_queries(input_data.query):
+                        emit_agent_progress(
+                            label="Search: public research retry",
+                            detail=(
+                                "No public-provider results for "
+                                f"{_quote(input_data.query)}; retrying "
+                                f"with {_quote(fallback_query)}."
+                            ),
+                            step_type="retrieval",
+                        )
+                        results = await self._querykit_service.search(
+                            fallback_query,
+                            providers=input_data.providers,
+                            limit=input_data.top_k,
+                            since_year=input_data.since_year,
+                        )
+                        if results:
+                            logger.info(
+                                (
+                                    "search.query_kit.retry_success "
+                                    "original_query=%r retry_query=%r results=%s"
+                                ),
+                                input_data.query,
+                                fallback_query,
+                                len(results),
+                            )
+                            break
                 set_span_output(
-                    local_span,
-                    [_search_result_trace_payload(result) for result in local_results],
+                    research_span,
+                    [_search_result_trace_payload(result) for result in results],
                 )
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            results.extend(local_results)
-            logger.info(
-                "search.local_bm25.end query=%r results=%s elapsed_ms=%.0f",
-                input_data.query,
-                len(local_results),
-                elapsed_ms,
-            )
+        except Exception as exc:
+            logger.warning("search.querykit_failed", exc_info=True)
             emit_agent_progress(
-                label="Search: local BM25 complete",
-                detail=f"{len(local_results)} result(s) in {elapsed_ms:.0f} ms.",
-                step_type="retrieval",
-            )
-        if input_data.source in {"research", "all"}:
-            if self._querykit_service is None:
-                raise ValueError("query-kit service is not configured")
-            start = time.perf_counter()
-            provider_detail = (
-                ",".join(input_data.providers)
-                if input_data.providers
-                else "configured providers"
-            )
-            emit_agent_progress(
-                label="Search: public research",
+                label="Search: public research failed",
                 detail=(
-                    f"Running query-kit for {_quote(input_data.query)} "
-                    f"against {provider_detail}."
+                    f"{type(exc).__name__}: {_truncate(str(exc), 240)}. "
+                    "Continuing without public-provider results."
                 ),
                 step_type="retrieval",
             )
-            try:
-                with trace_span(
-                    "search.query_kit",
-                    kind="RETRIEVER",
-                    input_value={
-                        "query": input_data.query,
-                        "providers": input_data.providers,
-                        "limit": input_data.top_k,
-                        "since_year": input_data.since_year,
-                    },
-                    attributes={"retrieval.source": "query-kit"},
-                ) as research_span:
-                    research_results = await self._querykit_service.search(
-                        input_data.query,
-                        providers=input_data.providers,
-                        limit=input_data.top_k,
-                        since_year=input_data.since_year,
-                    )
-                    if not research_results:
-                        for fallback_query in _provider_friendly_queries(
-                            input_data.query
-                        ):
-                            emit_agent_progress(
-                                label="Search: public research retry",
-                                detail=(
-                                    "No public-provider results for "
-                                    f"{_quote(input_data.query)}; retrying "
-                                    f"with {_quote(fallback_query)}."
-                                ),
-                                step_type="retrieval",
-                            )
-                            research_results = await self._querykit_service.search(
-                                fallback_query,
-                                providers=input_data.providers,
-                                limit=input_data.top_k,
-                                since_year=input_data.since_year,
-                            )
-                            if research_results:
-                                logger.info(
-                                    (
-                                        "search.query_kit.retry_success "
-                                        "original_query=%r retry_query=%r results=%s"
-                                    ),
-                                    input_data.query,
-                                    fallback_query,
-                                    len(research_results),
-                                )
-                                break
-                    set_span_output(
-                        research_span,
-                        [
-                            _search_result_trace_payload(result)
-                            for result in research_results
-                        ],
-                    )
-            except Exception as exc:
-                logger.warning("search.querykit_failed", exc_info=True)
-                emit_agent_progress(
-                    label="Search: public research failed",
-                    detail=(
-                        f"{type(exc).__name__}: {_truncate(str(exc), 240)}. "
-                        f"Continuing with {len(results)} local result(s)."
-                    ),
-                    step_type="retrieval",
-                )
-                research_results = []
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            results.extend(research_results)
-            logger.info(
-                "search.query_kit.end query=%r results=%s elapsed_ms=%.0f",
-                input_data.query,
-                len(research_results),
-                elapsed_ms,
-            )
-            emit_agent_progress(
-                label="Search: public research complete",
-                detail=f"{len(research_results)} result(s) in {elapsed_ms:.0f} ms.",
-                step_type="retrieval",
-            )
+            results = []
+
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "search.query_kit.end query=%r results=%s elapsed_ms=%.0f",
+            input_data.query,
+            len(results),
+            elapsed_ms,
+        )
+        emit_agent_progress(
+            label="Search: public research complete",
+            detail=f"{len(results)} result(s) in {elapsed_ms:.0f} ms.",
+            step_type="retrieval",
+        )
         tool_results = [
             _to_tool_result(result, citation_id=f"S{index}")
             for index, result in enumerate(results[: input_data.top_k], start=1)
@@ -223,7 +177,7 @@ def _search_summary(input_data: SearchToolInput) -> str:
     since = f", since_year={input_data.since_year}" if input_data.since_year else ""
     return (
         f"query={_quote(input_data.query)}, top_k={input_data.top_k}, "
-        f"source={input_data.source}, providers={providers}{since}"
+        f"providers={providers}{since}"
     )
 
 

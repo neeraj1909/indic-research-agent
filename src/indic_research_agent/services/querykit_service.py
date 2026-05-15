@@ -15,7 +15,6 @@ from query_cli.bootstrap import get_search_providers
 from query_cli.domain.errors import ProviderSearchError
 
 from indic_research_agent.config import AppSettings, get_settings
-from indic_research_agent.retrieval import SearchResult
 from indic_research_agent.services.cache_service import CacheService
 from indic_research_agent.services.phoenix_tracing import (
     set_span_attributes,
@@ -23,6 +22,7 @@ from indic_research_agent.services.phoenix_tracing import (
     trace_span,
 )
 from indic_research_agent.services.progress_events import emit_agent_progress
+from indic_research_agent.services.search_results import SearchResult
 
 ProviderFactory = Callable[..., Sequence[Any]]
 SearchFunction = Callable[..., Awaitable[Sequence[Any]]]

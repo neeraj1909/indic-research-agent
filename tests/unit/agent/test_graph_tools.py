@@ -6,9 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from indic_research_agent.agent.graph import build_agent_graph
-from indic_research_agent.retrieval import DocumentChunk, SearchService
-from indic_research_agent.retrieval.search_service import SearchResult
-from indic_research_agent.tools.fetch import FetchTool
+from indic_research_agent.services.search_results import SearchResult
 from indic_research_agent.tools.search import SearchTool
 
 pytestmark = pytest.mark.unit
@@ -32,30 +30,15 @@ class FakeToolCallingModel:
                     {
                         "name": "search",
                         "args": {
-                            "query": "bm25 keyword retrieval",
+                            "query": "Hindi OCR public research",
                             "top_k": 2,
-                            "source": "all",
+                            "providers": ["arxiv"],
                         },
                         "id": "call-search",
                     }
                 ],
             )
-        if self.calls == 2:
-            return AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "fetch",
-                        "args": {
-                            "document_id": "bm25",
-                            "chunk_id": "bm25-1",
-                            "max_chars": 120,
-                        },
-                        "id": "call-fetch",
-                    }
-                ],
-            )
-        return AIMessage(content="BM25 retrieval works with fetched evidence.")
+        return AIMessage(content="Public research search works with evidence.")
 
 
 class BudgetExhaustionModel:
@@ -71,8 +54,8 @@ class BudgetExhaustionModel:
         assert "tool-call budget is exhausted" in messages[-1].content
         return AIMessage(
             content=(
-                "Use the retrieved BM25 result for the final answer. [S1]\n\n"
-                "Sources:\n- [S1] BM25, local corpus, bm25/bm25-1."
+                "Use the retrieved public research result for the final answer. "
+                "[S1]\n\nSources:\n- [S1] Query-kit research result, arxiv."
             )
         )
 
@@ -89,9 +72,9 @@ class BoundBudgetExhaustionModel:
                 {
                     "name": "search",
                     "args": {
-                        "query": "bm25 keyword retrieval",
+                        "query": "Hindi OCR public research",
                         "top_k": 1,
-                        "source": "local",
+                        "providers": ["arxiv"],
                     },
                     "id": "call-search",
                 }
@@ -126,7 +109,7 @@ class FakeQueryKitService:
 
 
 @pytest.mark.asyncio
-async def test_graph_executes_search_then_fetch_then_final_answer(
+async def test_graph_executes_public_search_then_final_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     span_outputs: list[object] = []
@@ -139,23 +122,11 @@ async def test_graph_executes_search_then_fetch_then_final_answer(
         capture_span_output,
     )
 
-    search_service = SearchService(
-        [
-            DocumentChunk(
-                document_id="bm25",
-                chunk_id="bm25-1",
-                title="BM25",
-                source="test://bm25",
-                text="BM25 keyword retrieval ranks chunks without embeddings.",
-            )
-        ]
-    )
     model = FakeToolCallingModel()
     querykit_service = FakeQueryKitService()
     graph = build_agent_graph(
         model,
-        search_tool=SearchTool(search_service, querykit_service),
-        fetch_tool=FetchTool(search_service),
+        search_tool=SearchTool(querykit_service),
     )
 
     result = await graph.ainvoke(
@@ -168,50 +139,39 @@ async def test_graph_executes_search_then_fetch_then_final_answer(
     )
 
     assert model.bound_tools is not None
-    assert model.calls == 3
-    assert result["final_answer"] == "BM25 retrieval works with fetched evidence."
-    assert result["tool_call_count"] == 2
-    assert len(result["retrieved_context"]) == 2
+    assert [tool.name for tool in model.bound_tools] == ["search"]
+    assert model.calls == 2
+    assert result["final_answer"] == "Public research search works with evidence."
+    assert result["tool_call_count"] == 1
+    assert len(result["retrieved_context"]) == 1
     search_payload = json.loads(result["retrieved_context"][0])
-    fetch_payload = json.loads(result["retrieved_context"][1])
-    assert querykit_service.calls
-    assert {item["document_id"] for item in search_payload} == {
-        "bm25",
-        "query-kit:research-1",
-    }
-    assert fetch_payload["content"].startswith("BM25 keyword retrieval")
+    assert querykit_service.calls == [
+        {
+            "query": "Hindi OCR public research",
+            "providers": ["arxiv"],
+            "limit": 2,
+            "since_year": None,
+        }
+    ]
+    assert {item["document_id"] for item in search_payload} == {"query-kit:research-1"}
     search_span_output = next(
         output
         for output in span_outputs
         if isinstance(output, dict)
-        and output.get("summary", "").startswith("2 result(s)")
+        and output.get("summary", "").startswith("1 result(s)")
     )
-    assert search_span_output["metadata"]["result_count"] == 2
-    assert len(search_span_output["results"]) == 2
-    assert search_span_output["results"][0]["snippet"].startswith(
-        "BM25 keyword retrieval"
-    )
+    assert search_span_output["metadata"]["result_count"] == 1
+    assert len(search_span_output["results"]) == 1
+    assert search_span_output["results"][0]["snippet"].startswith("Public research")
     assert search_span_output["results"][0]["citation_id"] == "S1"
 
 
 @pytest.mark.asyncio
 async def test_graph_forces_final_answer_when_tool_budget_is_exhausted() -> None:
-    search_service = SearchService(
-        [
-            DocumentChunk(
-                document_id="bm25",
-                chunk_id="bm25-1",
-                title="BM25",
-                source="test://bm25",
-                text="BM25 keyword retrieval ranks chunks without embeddings.",
-            )
-        ]
-    )
     model = BudgetExhaustionModel()
     graph = build_agent_graph(
         model,
-        search_tool=SearchTool(search_service),
-        fetch_tool=FetchTool(search_service),
+        search_tool=SearchTool(FakeQueryKitService()),
         max_tool_calls=1,
     )
 
@@ -227,5 +187,5 @@ async def test_graph_forces_final_answer_when_tool_budget_is_exhausted() -> None
     assert model.bound_calls == 1
     assert model.unbound_calls == 1
     assert result["tool_call_count"] == 1
-    assert result["final_answer"].startswith("Use the retrieved BM25 result")
+    assert result["final_answer"].startswith("Use the retrieved public research")
     assert result["final_answer"].strip()
