@@ -83,16 +83,42 @@ Browser
 
 ## Architecture
 
-| Layer | Main location | Responsibility |
-| --- | --- | --- |
-| Chainlit adapter | `src/indic_research_agent/ui/` | Authentication, lifecycle callbacks, data layer, and rendering. |
-| Controller | `src/indic_research_agent/controllers/` | UI-facing request boundary and JSON-safe session state. |
-| Agent service | `src/indic_research_agent/services/agent_service.py` | Streams framework-neutral agent events and records optional audit data. |
-| LangGraph agent | `src/indic_research_agent/agent/` | Prompt policy, model creation, tool binding, and tool-calling loop. |
-| Research tool | `src/indic_research_agent/tools/` | Typed search schema and public-provider tool implementation. |
-| Provider adapter | `src/indic_research_agent/services/querykit_service.py` | Async `query-kit` integration, provider fallback, and result normalization. |
-| Persistence | `src/indic_research_agent/models/`, `repositories/`, `migrations/` | SQLAlchemy models, repositories, and Alembic schema changes. |
-| Cache | `src/indic_research_agent/services/cache_service.py` | Redis-backed JSON cache and namespace TTL policy. |
+### Compiled LangGraph
+
+The agent graph is a two-node tool-calling loop compiled by
+`build_agent_graph()`:
+
+![Compiled LangGraph agent flow](docs/diagrams/langgraph-agent.png)
+
+The transitions shown in the generated graph are:
+
+- `__start__ -> llm`: begin with the LiteLLM-compatible model.
+- `llm -> tools`: the model emitted a tool call and the tool-call budget is
+  still available.
+- `tools -> llm`: execute the public research search and return its results to
+  the model.
+- `llm -> __end__`: the model returned an answer without a tool call, or the
+  `max_tool_calls` limit was reached.
+
+The graph state carries `messages`, `tool_call_count`, `retrieved_context`, and
+`final_answer`. The diagram is generated from the compiled graph rather than
+hand-drawn. Regenerate it after changing `src/indic_research_agent/agent/graph.py`:
+
+```bash
+uv run python scripts/export_agent_graph.py
+```
+
+The exporter uses a compile-only model stub; it does not call an LLM or a
+public research provider.
+
+### Surrounding service boundaries
+
+- Chainlit callbacks call `ChatController`, which delegates to
+  `AgentService` for framework-neutral graph events and answer streaming.
+- The `tools` node invokes `SearchTool`, which uses `QueryKitService` to query
+  configured public research providers and normalize results.
+- PostgreSQL stores Chainlit history and application audit rows; Redis stores
+  search/tool cache entries outside the LangGraph state.
 
 Chainlit remains a thin UI adapter. Orchestration belongs in services and LangGraph modules; retrieval and tool behavior should remain testable without a live LLM.
 
@@ -268,9 +294,12 @@ For changes affecting Chainlit, authentication, streaming, migrations, or provid
 ├── .env.example               # Local configuration template
 ├── docs/
 │   ├── architecture.md        # Focused architecture notes
+│   ├── diagrams/
+│   │   └── langgraph-agent.png # Generated compiled graph topology
 │   └── technical-report.md    # Research-style technical report
 ├── migrations/                # Alembic environment and revisions
 ├── scripts/
+│   ├── export_agent_graph.py   # Generate the LangGraph topology image
 │   ├── migrate.sh             # Run database migrations
 │   ├── probe_querykit_providers.py
 │   ├── smoke_query.py         # Deterministic end-to-end smoke
