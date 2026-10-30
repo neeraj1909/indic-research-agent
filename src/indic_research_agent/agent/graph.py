@@ -18,7 +18,9 @@ from langchain_core.messages import (
 from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
+from indic_research_agent.agent.citations import assign_run_citations
 from indic_research_agent.agent.prompts import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
@@ -46,6 +48,9 @@ def build_agent_graph(
     system_prompt: str = SYSTEM_PROMPT,
 ):
     """Build the LangGraph tool-calling loop."""
+
+    if max_tool_calls < 0:
+        raise ValueError("max_tool_calls must be non-negative")
 
     langchain_tools = _create_langchain_tools(search_tool)
     system_prompt_version = (
@@ -149,9 +154,14 @@ def build_agent_graph(
         last_message = state["messages"][-1]
         tool_messages: list[ToolMessage] = []
         retrieved_context = list(state.get("retrieved_context", []))
-        for tool_call in _tool_calls(last_message):
+        requested_calls = _tool_calls(last_message)
+        remaining_admissions = max(0, max_tool_calls - state.get("tool_call_count", 0))
+        admitted_calls = 0
+        for tool_call in requested_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call.get("args", {})
+            result: Any = None
+            error: str | None = None
             start = time.perf_counter()
             logger.info("agent.tool.start name=%s args=%s", tool_name, tool_args)
             _emit_custom(
@@ -169,21 +179,45 @@ def build_agent_graph(
                 input_value=tool_args,
                 attributes=tool_attributes(name=tool_name, parameters=tool_args),
             ) as tool_span:
-                if tool_name != "search":
-                    raise ValueError(f"unknown tool: {tool_name}")
-                result = await search_tool.run(
-                    SearchToolInput.model_validate(tool_args)
-                )
-                tool_result_metadata = _tool_result_metadata(result)
-                set_span_attributes(tool_span, _tool_result_attributes(result))
-                set_span_output(
-                    tool_span,
-                    {
-                        "summary": _summarize_tool_result(result),
-                        "metadata": tool_result_metadata,
-                        "results": _tool_result_trace_payload(result),
-                    },
-                )
+                if admitted_calls >= remaining_admissions:
+                    error = "tool-call budget exhausted"
+                    payload = _tool_error_payload(error)
+                    set_span_output(tool_span, {"error": error})
+                else:
+                    admitted_calls += 1
+                    if tool_name != "search":
+                        error = "unknown tool"
+                        payload = _tool_error_payload(error)
+                        set_span_output(tool_span, {"error": error})
+                    else:
+                        try:
+                            validated_args = SearchToolInput.model_validate(tool_args)
+                        except ValidationError:
+                            error = "invalid arguments"
+                            payload = _tool_error_payload(error)
+                            set_span_output(tool_span, {"error": error})
+                        else:
+                            try:
+                                result = await search_tool.run(validated_args)
+                            except Exception:
+                                error = "search invocation failed"
+                                payload = _tool_error_payload(error)
+                                set_span_output(tool_span, {"error": error})
+                            else:
+                                result = assign_run_citations(result, retrieved_context)
+                                tool_result_metadata = _tool_result_metadata(result)
+                                set_span_attributes(
+                                    tool_span, _tool_result_attributes(result)
+                                )
+                                set_span_output(
+                                    tool_span,
+                                    {
+                                        "summary": _summarize_tool_result(result),
+                                        "metadata": tool_result_metadata,
+                                        "results": _tool_result_trace_payload(result),
+                                    },
+                                )
+                                payload = _dump_tool_payload(result)
             elapsed = time.perf_counter() - start
             logger.info(
                 "agent.tool.end name=%s elapsed_seconds=%.2f",
@@ -191,7 +225,6 @@ def build_agent_graph(
                 elapsed,
             )
 
-            payload = _dump_tool_payload(result)
             _emit_custom(
                 {
                     "event": "agent.tool.end",
@@ -199,11 +232,16 @@ def build_agent_graph(
                     "tool_call_id": tool_call.get("id"),
                     "args": tool_args,
                     "latency_ms": elapsed * 1000,
-                    "result_summary": _summarize_tool_result(result),
-                    "result_metadata": _tool_result_metadata(result),
+                    "result_summary": (
+                        _summarize_tool_result(result) if error is None else payload
+                    ),
+                    "result_metadata": (
+                        _tool_result_metadata(result) if error is None else {}
+                    ),
                 }
             )
-            retrieved_context.append(payload)
+            if tool_name == "search" and error is None:
+                retrieved_context.append(payload)
             tool_messages.append(
                 ToolMessage(
                     content=payload,
@@ -214,7 +252,10 @@ def build_agent_graph(
 
         return {
             "messages": tool_messages,
-            "tool_call_count": state.get("tool_call_count", 0) + len(tool_messages),
+            "tool_call_count": min(
+                max_tool_calls,
+                state.get("tool_call_count", 0) + admitted_calls,
+            ),
             "retrieved_context": retrieved_context,
         }
 
@@ -369,6 +410,10 @@ def _dump_tool_payload(result: Any) -> str:
     if isinstance(result, list):
         return json.dumps([item.model_dump() for item in result], sort_keys=True)
     return json.dumps(result.model_dump(), sort_keys=True)
+
+
+def _tool_error_payload(error: str) -> str:
+    return f"Tool call not executed: {error}"
 
 
 def _emit_custom(payload: dict[str, Any]) -> None:
