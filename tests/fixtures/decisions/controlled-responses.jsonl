@@ -1,0 +1,10 @@
+{"id":"dev-en-01","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"research","confidence":0.92}]}}
+{"id":"dev-en-02","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"clarify","confidence":0.81}]}}
+{"id":"dev-en-03","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"supplied_text","confidence":0.88}]}}
+{"id":"held-en-01","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"research","confidence":0.95}]}}
+{"id":"held-en-09","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"clarify","confidence":0.84}]}}
+{"id":"held-en-17","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"supplied_text","confidence":0.9}]}}
+{"id":"held-en-25","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"unsupported_local_documents","confidence":0.86}]}}
+{"id":"held-en-33","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"legacy","confidence":0.72}]}}
+{"id":"held-en-34","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"not-a-route","confidence":0.7}]}}
+{"id":"held-en-35","response":{"source":"controlled","answers":[{"type":"choice","name":"route","choice":"research"},{"type":"choice","name":"route","choice":"legacy"}]}}
