@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 from langchain_core.messages import AIMessage
 
+from indic_research_agent.config import AppSettings
+from indic_research_agent.services import agent_service as agent_service_module
 from indic_research_agent.services.agent_events import (
     AgentCompleted,
     AgentProgress,
@@ -118,3 +120,55 @@ async def test_answer_collects_final_completion_from_stream() -> None:
 
     assert answer.answer == "Hindi OCR works."
     assert answer.tool_call_count == 1
+
+
+def test_default_graph_uses_injected_settings(monkeypatch) -> None:
+    settings = AppSettings(_env_file=None, litellm_model="injected/model")
+    seen: dict[str, object] = {}
+    sentinel_model = object()
+    sentinel_graph = object()
+
+    def fake_create_chat_model(received_settings):
+        seen["settings"] = received_settings
+        return sentinel_model
+
+    def fake_build_agent_graph(model, *, search_tool):
+        seen["model"] = model
+        seen["search_tool"] = search_tool
+        return sentinel_graph
+
+    monkeypatch.setattr(
+        agent_service_module, "create_chat_model", fake_create_chat_model
+    )
+    monkeypatch.setattr(
+        agent_service_module, "build_agent_graph", fake_build_agent_graph
+    )
+
+    service = AgentService(settings=settings)
+
+    assert service._settings is settings
+    assert service._graph is sentinel_graph
+    assert seen["settings"] is settings
+    assert seen["model"] is sentinel_model
+
+
+def test_default_graph_without_settings_uses_global_settings(monkeypatch) -> None:
+    settings = AppSettings(_env_file=None, litellm_model="default/model")
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(agent_service_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        agent_service_module,
+        "create_chat_model",
+        lambda received_settings: seen.setdefault("settings", received_settings),
+    )
+    monkeypatch.setattr(
+        agent_service_module,
+        "build_agent_graph",
+        lambda model, *, search_tool: seen.setdefault("model", model),
+    )
+
+    graph = agent_service_module.create_default_graph()
+
+    assert graph is seen["model"]
+    assert seen["settings"] is settings

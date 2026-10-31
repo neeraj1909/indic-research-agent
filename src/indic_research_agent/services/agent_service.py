@@ -8,11 +8,25 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from indic_research_agent.agent.decision import (
+    DecisionOutcome,
+    DecisionRequest,
+    DecisionRoute,
+    decide,
+)
+from indic_research_agent.agent.decisions_provider import create_decisions_provider
 from indic_research_agent.agent.graph import build_agent_graph
 from indic_research_agent.agent.llm import create_chat_model
+from indic_research_agent.config import AppSettings, get_settings
 from indic_research_agent.db.session import create_session_factory, session_scope
 from indic_research_agent.services.agent_events import (
     AgentCompleted,
@@ -56,10 +70,20 @@ class AgentService:
         *,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         persist_queries: bool = False,
+        decisions_provider=None,
+        transformation_model=None,
+        settings: AppSettings | None = None,
     ) -> None:
-        self._graph = graph if graph is not None else create_default_graph()
+        self._settings = settings or get_settings()
+        self._graph = (
+            graph if graph is not None else create_default_graph(self._settings)
+        )
         self._session_factory = session_factory
         self._persist_queries = persist_queries
+        self._transformation_model = transformation_model
+        self._decisions_provider = decisions_provider
+        if self._decisions_provider is None and self._settings.decisions_mode != "off":
+            self._decisions_provider = create_decisions_provider(self._settings)
 
     async def answer(
         self,
@@ -143,6 +167,14 @@ class AgentService:
                 step_type="run",
             )
 
+            decision = await self._evaluate_decision(question, run_span)
+            if decision is not None and self._settings.decisions_mode != "off":
+                yield AgentProgress(
+                    label="Decision",
+                    detail=f"status={decision.status} route={decision.route.value}",
+                    step_type="run",
+                )
+
             if should_persist:
                 query_id = await self._record_query(
                     text=question,
@@ -169,6 +201,53 @@ class AgentService:
                 "retrieved_context": [],
                 "final_answer": None,
             }
+
+            if decision is not None and decision.route is DecisionRoute.SUPPLIED_TEXT:
+                try:
+                    completed = await self._transform_supplied_text(question)
+                except Exception as exc:
+                    logger.exception("agent.transformation.failed")
+                    record_span_exception(run_span, exc)
+                    yield AgentFailed(message="text transformation failed")
+                    force_flush_traces()
+                    return
+                set_span_output(
+                    run_span,
+                    {
+                        "answer": completed.answer,
+                        "retrieved_context_count": 0,
+                        "tool_call_count": 0,
+                    },
+                )
+                if should_persist and query_id is not None:
+                    await self._record_response(query_id=query_id, event=completed)
+                if completed.answer:
+                    yield AgentToken(text=completed.answer)
+                yield completed
+                force_flush_traces()
+                return
+
+            if decision is not None and decision.route in {
+                DecisionRoute.CLARIFY,
+                DecisionRoute.UNSUPPORTED_LOCAL_DOCUMENTS,
+            }:
+                completed = AgentCompleted(
+                    answer=_decision_answer(decision.route),
+                    retrieved_context=[],
+                    tool_call_count=0,
+                )
+                set_span_output(
+                    run_span,
+                    {
+                        "answer": completed.answer,
+                        "retrieved_context_count": 0,
+                        "tool_call_count": 0,
+                    },
+                )
+                if should_persist and query_id is not None:
+                    await self._record_response(query_id=query_id, event=completed)
+                yield completed
+                return
 
             try:
                 async for raw_chunk in self._stream_graph(input_state, session_id):
@@ -231,6 +310,73 @@ class AgentService:
                 yield AgentFailed(message=str(exc))
             finally:
                 force_flush_traces()
+
+    async def _evaluate_decision(
+        self, question: str, run_span
+    ) -> DecisionOutcome | None:
+        if self._settings.decisions_mode == "off" or self._decisions_provider is None:
+            return None
+        try:
+            request = DecisionRequest(
+                text=question,
+                requested_model=self._settings.decisions_model,
+                rubric_version="route-v1",
+            )
+        except ValueError:
+            set_span_attributes(
+                run_span,
+                {
+                    "agent.decisions.mode": self._settings.decisions_mode,
+                    "agent.decisions.status": "fallback",
+                    "agent.decisions.route": DecisionRoute.LEGACY.value,
+                    "agent.decisions.fallback_reason": "invalid_request",
+                },
+            )
+            return None
+        outcome = await decide(
+            request,
+            self._decisions_provider,
+            source="model",
+            timeout_seconds=self._settings.decisions_timeout_seconds,
+        )
+        set_span_attributes(
+            run_span,
+            {
+                "agent.decisions.mode": self._settings.decisions_mode,
+                "agent.decisions.status": outcome.status,
+                "agent.decisions.route": outcome.route.value,
+                "agent.decisions.fallback_reason": outcome.fallback_reason or "",
+            },
+        )
+        return outcome if self._settings.decisions_mode == "active" else None
+
+    async def _transform_supplied_text(self, request_text: str) -> AgentCompleted:
+        """Transform supplied text with a model that has no search-tool binding."""
+
+        model = self._transformation_model
+        if model is None:
+            model = create_chat_model(self._settings)
+            self._transformation_model = model
+        response = await model.ainvoke(
+            [
+                SystemMessage(
+                    content=(
+                        "Transform the supplied text according to the user's "
+                        "request. Do not research, call tools, add facts, or "
+                        "invent missing content. Return only the transformed "
+                        "text. If the requested transformation is unclear, "
+                        "preserve the text and state the ambiguity briefly."
+                    )
+                ),
+                HumanMessage(content=request_text),
+            ]
+        )
+        content = getattr(response, "content", response)
+        answer = content if isinstance(content, str) else str(content)
+        answer = answer.strip()
+        if not answer:
+            raise RuntimeError("transformation model returned empty content")
+        return AgentCompleted(answer=answer, retrieved_context=[], tool_call_count=0)
 
     async def _stream_graph(
         self,
@@ -301,11 +447,26 @@ class AgentService:
         return self._session_factory
 
 
-def create_default_graph():
+def create_default_graph(settings: AppSettings | None = None):
+    settings = settings or get_settings()
     search_tool = SearchTool(QueryKitService())
     return build_agent_graph(
-        create_chat_model(),
+        create_chat_model(settings),
         search_tool=search_tool,
+    )
+
+
+def _decision_answer(route: DecisionRoute) -> str:
+    if route is DecisionRoute.CLARIFY:
+        return "Could you clarify the outcome, scope, or time period you need?"
+    if route is DecisionRoute.SUPPLIED_TEXT:
+        return (
+            "Please provide the text you want me to transform "
+            "so I do not invent missing content."
+        )
+    return (
+        "I can research public sources, but I cannot search local attachments "
+        "or documents here."
     )
 
 
