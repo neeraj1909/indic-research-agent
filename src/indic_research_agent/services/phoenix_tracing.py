@@ -228,7 +228,6 @@ def _instrument_openinference(provider: TracerProvider, *, enabled: bool) -> Non
         return
     for import_path, class_name in (
         ("openinference.instrumentation.langchain", "LangChainInstrumentor"),
-        ("openinference.instrumentation.litellm", "LiteLLMInstrumentor"),
     ):
         try:
             module = __import__(import_path, fromlist=[class_name])

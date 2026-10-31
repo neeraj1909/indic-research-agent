@@ -1,15 +1,14 @@
-"""OpenAI-compatible streaming chat client for LiteLLM proxy model IDs."""
+"""OpenAI-compatible chat completion client."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import urllib.error
-import urllib.request
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+import httpx
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -22,17 +21,10 @@ from langchain_core.tools import BaseTool
 
 @dataclass(frozen=True)
 class OpenAICompatibleStreamingChatModel:
-    """Small async model adapter for OpenAI-compatible streaming endpoints.
-
-    Some LiteLLM proxy model IDs are named ``chatgpt/...``. Passing those IDs
-    through the LiteLLM Python SDK can collide with LiteLLM's built-in ChatGPT
-    provider and trigger an interactive device-login flow. This adapter talks
-    to the configured proxy endpoint directly while preserving the LangGraph
-    ``bind_tools`` / ``ainvoke`` surface used by the app.
-    """
+    """Async adapter for the application's OpenAI chat completion boundary."""
 
     model: str
-    api_key: str
+    api_key: str = field(repr=False)
     api_base: str
     temperature: float = 0.2
     request_timeout: float = 30.0
@@ -62,33 +54,31 @@ class OpenAICompatibleStreamingChatModel:
         if self.tools:
             payload["tools"] = [_tool_to_openai(tool) for tool in self.tools]
 
-        request = urllib.request.Request(
-            _chat_completions_url(self.api_base),
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream" if self.streaming else "application/json",
-            },
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.request_timeout,
-            ) as response:
+            with (
+                httpx.Client(
+                    trust_env=False,
+                    follow_redirects=False,
+                    timeout=self.request_timeout,
+                ) as client,
+                client.stream(
+                    "POST",
+                    _chat_completions_url(self.api_base),
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Accept": "text/event-stream"
+                        if self.streaming
+                        else "application/json",
+                    },
+                ) as response,
+            ):
+                response.raise_for_status()
                 if self.streaming:
-                    return _ai_message_from_stream(
-                        raw.decode("utf-8", "replace") for raw in response
-                    )
-                return _ai_message_from_payload(
-                    json.loads(response.read().decode("utf-8"))
-                )
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(
-                f"OpenAI-compatible chat request failed with HTTP {exc.code}: {body}"
-            ) from exc
+                    return _ai_message_from_stream(response.iter_lines())
+                return _ai_message_from_payload(json.loads(response.read()))
+        except httpx.HTTPError:
+            raise RuntimeError("OpenAI chat request failed") from None
 
 
 def _chat_completions_url(api_base: str) -> str:
@@ -164,12 +154,16 @@ def _ai_message_from_payload(payload: dict[str, Any]) -> AIMessage:
 def _ai_message_from_stream(lines: Iterable[str]) -> AIMessage:
     content_parts: list[str] = []
     tool_calls: dict[int, dict[str, Any]] = {}
+    completed = False
     for line in lines:
         line = line.strip()
         if not line.startswith("data:"):
             continue
         data = line.removeprefix("data:").strip()
-        if not data or data == "[DONE]":
+        if data == "[DONE]":
+            completed = True
+            break
+        if not data:
             continue
         chunk = json.loads(data)
         delta = chunk.get("choices", [{}])[0].get("delta", {})
@@ -188,6 +182,9 @@ def _ai_message_from_stream(lines: Iterable[str]) -> AIMessage:
                 existing["name"] = function["name"]
             if function.get("arguments"):
                 existing["arguments"] += function["arguments"]
+
+    if not completed:
+        raise RuntimeError("OpenAI chat stream ended before completion")
 
     return AIMessage(
         content="".join(content_parts),

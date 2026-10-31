@@ -1,4 +1,4 @@
-"""LiteLLM chat model factory."""
+"""Direct OpenAI chat model factory."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 from collections.abc import Sequence
 
 from langchain_core.messages import HumanMessage
-from langchain_litellm import ChatLiteLLM
 
 from indic_research_agent.agent.openai_streaming import (
     OpenAICompatibleStreamingChatModel,
@@ -18,39 +17,27 @@ from indic_research_agent.config import AppSettings, get_settings
 
 def create_chat_model(
     settings: AppSettings | None = None,
-) -> ChatLiteLLM | OpenAICompatibleStreamingChatModel:
-    """Create the LiteLLM-backed LangChain chat model."""
-
+) -> OpenAICompatibleStreamingChatModel:
+    """Create the direct OpenAI model; never inherit a proxy base URL."""
     settings = settings or get_settings()
-    api_key = (
-        settings.litellm_api_key.get_secret_value()
-        if settings.litellm_api_key is not None
-        else None
-    )
-    if _should_use_streaming_proxy_adapter(settings, api_key):
-        return OpenAICompatibleStreamingChatModel(
-            model=settings.litellm_model,
-            api_key=api_key,
-            api_base=settings.litellm_api_base or "",
-            temperature=settings.litellm_temperature,
-            request_timeout=settings.litellm_timeout_seconds,
-            max_tokens=settings.litellm_max_tokens,
-            streaming=settings.litellm_streaming,
-        )
-    return ChatLiteLLM(
-        model=settings.litellm_model,
-        custom_llm_provider=settings.litellm_custom_llm_provider,
-        api_key=api_key,
-        api_base=settings.litellm_api_base,
-        temperature=settings.litellm_temperature,
-        request_timeout=settings.litellm_timeout_seconds,
-        max_tokens=settings.litellm_max_tokens,
-        streaming=settings.litellm_streaming,
+    if (
+        settings.openai_api_key is None
+        or not settings.openai_api_key.get_secret_value()
+    ):
+        raise ValueError("OPENAI_API_KEY is required")
+    return OpenAICompatibleStreamingChatModel(
+        model=settings.openai_model,
+        api_key=settings.openai_api_key.get_secret_value(),
+        api_base="https://api.openai.com/v1",
+        temperature=settings.openai_temperature,
+        request_timeout=settings.openai_timeout_seconds,
+        max_tokens=settings.openai_max_tokens,
+        streaming=settings.openai_streaming,
     )
 
 
 async def smoke_chat(prompt: str, settings: AppSettings | None = None) -> str:
-    """Run one LiteLLM-backed chat completion."""
+    """Run one OpenAI-backed chat completion."""
 
     model = create_chat_model(settings)
     response = await model.ainvoke([HumanMessage(content=prompt)])
@@ -58,12 +45,12 @@ async def smoke_chat(prompt: str, settings: AppSettings | None = None) -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LiteLLM adapter utilities")
+    parser = argparse.ArgumentParser(description="OpenAI adapter utilities")
     parser.add_argument("--smoke", action="store_true", help="Run adapter smoke check")
     parser.add_argument(
         "--live",
         action="store_true",
-        help="Call the configured LiteLLM provider instead of dry-running",
+        help="Call the configured OpenAI provider instead of dry-running",
     )
     parser.add_argument(
         "--prompt",
@@ -83,7 +70,15 @@ async def _main_async(argv: Sequence[str] | None = None) -> int:
         return 0
 
     model = create_chat_model(settings)
-    print(json.dumps(settings.masked_litellm_config, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "model": settings.openai_model,
+                "has_api_key": settings.openai_api_key is not None,
+            },
+            sort_keys=True,
+        )
+    )
     print(f"adapter={model.__class__.__module__}.{model.__class__.__name__}")
 
     if not args.live:
@@ -97,18 +92,6 @@ async def _main_async(argv: Sequence[str] | None = None) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     return asyncio.run(_main_async(argv))
-
-
-def _should_use_streaming_proxy_adapter(
-    settings: AppSettings,
-    api_key: str | None,
-) -> bool:
-    return bool(
-        settings.litellm_streaming
-        and settings.litellm_model.startswith("chatgpt/")
-        and settings.litellm_api_base
-        and api_key
-    )
 
 
 if __name__ == "__main__":

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AppSettings(BaseSettings):
     """Environment-backed application settings.
 
-    Provider-specific LiteLLM API keys can still be supplied through their
-    native environment variables, such as OPENAI_API_KEY or ANTHROPIC_API_KEY.
+    Direct generation and Decisions use explicitly selected OpenAI credentials.
     """
 
     model_config = SettingsConfigDict(
@@ -27,6 +27,16 @@ class AppSettings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
 
+    openai_model: str = "gpt-4.1-mini"
+    openai_api_key: SecretStr | None = Field(
+        default=None, validation_alias="OPENAI_API_KEY"
+    )
+
+    openai_temperature: float = 0.2
+    openai_timeout_seconds: float = 30.0
+    openai_max_tokens: int | None = 1200
+    openai_streaming: bool = True
+
     litellm_model: str = "openai/gpt-4o-mini"
     litellm_custom_llm_provider: str | None = None
     litellm_api_key: SecretStr | None = None
@@ -35,6 +45,17 @@ class AppSettings(BaseSettings):
     litellm_timeout_seconds: float = 30.0
     litellm_max_tokens: int | None = 1200
     litellm_streaming: bool = True
+
+    decisions_mode: Literal["off", "shadow", "active"] = "off"
+    decisions_model: str = "gpt-6-luna"
+    decisions_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="INDIC_DECISIONS_API_KEY",
+    )
+    # The local live evidence observed a successful response in ~1.97s. Keep
+    # enough headroom for normal transport overhead while remaining bounded.
+    decisions_timeout_seconds: float = Field(default=5.0, gt=0, le=10)
+    decisions_max_concurrency: int = Field(default=1, gt=0, le=8)
 
     query_kit_providers: str = Field(
         default="semantic-scholar,semantic-scholar-web,pubmed,arxiv-web"
@@ -99,6 +120,12 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("BROWSER_COOKIE_JAR_FAIL_ON_ERROR"),
     )
 
+    @model_validator(mode="after")
+    def _default_decisions_key(self) -> AppSettings:
+        if self.decisions_api_key is None:
+            self.decisions_api_key = self.openai_api_key
+        return self
+
     @property
     def query_kit_provider_ids(self) -> list[str]:
         return [
@@ -118,6 +145,16 @@ class AppSettings(BaseSettings):
             "timeout_seconds": self.litellm_timeout_seconds,
             "max_tokens": self.litellm_max_tokens,
             "streaming": self.litellm_streaming,
+        }
+
+    @property
+    def masked_decisions_config(self) -> dict[str, object]:
+        return {
+            "mode": self.decisions_mode,
+            "model": self.decisions_model,
+            "has_api_key": self.decisions_api_key is not None,
+            "timeout_seconds": self.decisions_timeout_seconds,
+            "max_concurrency": self.decisions_max_concurrency,
         }
 
 
