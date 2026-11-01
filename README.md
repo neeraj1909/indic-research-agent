@@ -143,7 +143,7 @@ uv sync
 cp .env.example .env
 ```
 
-Edit `.env` before starting the application: set `OPENAI_API_KEY` privately and replace the development authentication secret for any non-local deployment.
+Edit `.env` before starting the application: set `OPENAI_API_KEY` privately and replace the development authentication secret for any non-local deployment. An `OPENAI_API_KEY` already exported in the shell takes precedence over the `.env` value; remove or update a stale shell value if authentication fails.
 
 ### 2. Start the full stack with Docker
 
