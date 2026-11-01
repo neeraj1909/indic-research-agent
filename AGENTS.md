@@ -9,7 +9,7 @@
 
 ## Architecture Constraints
 
-- Use LiteLLM as the Phase 1 LLM layer.
+- Use the direct OpenAI API for generation and OpenAI Decisions. The configured LiteLLM generation route initiated an unexpected device authorization flow; do not route these calls through LiteLLM without a new decision.
 - Use query-kit from `https://github.com/neeraj1909/query-kit`, imported as `query_cli`.
 - Retrieval must be BM25/keyword-based first.
 - Do not add embeddings, vector databases, `pgvector`, FAISS, Chroma, Milvus, Weaviate, Pinecone, sentence-transformers, or embedding API calls unless a later PRP records evidence that BM25 is insufficient.

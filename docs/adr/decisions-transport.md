@@ -1,5 +1,17 @@
 # ADR: Decisions transport boundary
 
+> **Current implementation note:** This ADR records the 2026-10-31 investigation.
+> The application now wires the bounded Decisions provider into `shadow` and
+> `active` routing, with `off` as the default; generation and Decisions call
+> OpenAI directly. Developers identified limitations in the LiteLLM Decisions
+> route and its handling of parallel calls; a separate generation probe started
+> an unexpected device authorization flow. The
+> older statements below about an evaluator-only implementation describe that
+> earlier point in time, including the LiteLLM generation constraint. LiteLLM's current [Decisions documentation](https://docs.litellm.ai/docs/decisions)
+> describes SDK support starting with version 1.104.2; the historical surface
+> inspection below applies to the versions named in that evidence, not all
+> LiteLLM releases. See the README for current configuration and evidence limits.
+
 - **Status:** Implemented prototype; latest bounded evaluator probe succeeded at
   the provider transport boundary, while application integration remains
   unverified and the expected Markdown report is missing.

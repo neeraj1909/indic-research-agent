@@ -267,7 +267,7 @@ help classify a request as `research`, `clarify`, `supplied_text`, or
 | Research workflow | Chainlit -> AgentService/LangGraph -> direct OpenAI generation -> typed `query-kit` public search -> cited answer. PostgreSQL and Redis retain their existing roles. |
 | Generation | Defaults to `gpt-4.1-mini` at `https://api.openai.com/v1/chat/completions`, including the active `supplied_text` transformation path. |
 | Decisions | Uses `gpt-6-luna` at `https://api.openai.com/v1/decisions`; mode defaults to `off`. Application `shadow`/`active` modes and opt-in evaluator CLIs share the direct transport. |
-| Transport isolation | Both transports receive an explicit OpenAI key, ignore inherited proxy/base-URL settings, disable redirects, and make no automatic retries. LiteLLM is not called by these application or comparison paths. |
+| Transport isolation | Both transports receive an explicit OpenAI key, ignore inherited proxy/base-URL settings, disable redirects, and make no automatic retries. LiteLLM is not called by these application or comparison paths; the configured LiteLLM generation route initiated an unexpected device authorization flow during validation. |
 | Evidence limit | Endpoint access, controlled-response tests, and offline replay do not establish a successful 20-case paired run or improved answer quality. Consult each run's artifacts. |
 
 The existing `LITELLM_*` settings remain accepted as legacy configuration, but
